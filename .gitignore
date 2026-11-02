@@ -1,0 +1,31 @@
+# ---- ESP-IDF ----
+build/
+sdkconfig
+sdkconfig.old
+sdkconfig.ci
+managed_components/
+
+# ---- 本地私有配置 / 密钥 ----
+.env
+.env.*
+components/BSP/WIFI/wifi_credentials.h
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ---- IDE ----
+.vscode/
+.idea/
+*.swp
+
+# ---- 编译产物 ----
+*.bin
+*.elf
+*.map
+*.hex
+*.uf2
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
