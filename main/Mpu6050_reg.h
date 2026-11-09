@@ -40,12 +40,19 @@ extern "C" {
 #define MPU6050_PWR1_CLKSEL_PLL_X	0x01
 /* GYRO_CONFIG: 满量程 ±2000 dps, 灵敏度 16.4 LSB/(°/s) */
 #define MPU6050_GYRO_FS_2000		0x18
-/* ACCEL_CONFIG: 满量程 ±16g, 灵敏度 2048 LSB/g */
-#define MPU6050_ACCEL_FS_16			0x18
 
-/* 灵敏度常数, 与上面的量程配置必须一致, 改配置时务必同步修改 */
+/* ACCEL_CONFIG: AFS_SEL 位域在 [4:3]
+ *   0=±2g  1=±4g  2=±8g  3=±16g
+ * 本工程选 ±8g：2.5g 跌倒判据留 3 倍裕度，同时 4096 LSB/g 让静态 1g 的信噪比好一倍。
+ * ±16g 只有在"冲击远超 5g 且明确不关心静态精度"时才用。 */
+#define MPU6050_ACCEL_FS_8			0x10	/* 4096 LSB/g */
+#define MPU6050_ACCEL_FS_16			0x18	/* 2048 LSB/g，备选 */
+
+/* 灵敏度常数, 与上面的量程配置必须成对修改。
+ * 只改量程不改常数 → 所有物理量整体差一个倍数，而且不会报任何错，只是"数据看着不对"。 */
 #define MPU6050_GYRO_SENS_2000DPS	16.4f	/* LSB/(°/s) */
-#define MPU6050_ACCEL_SENS_16G		2048.0f	/* LSB/g */
+#define MPU6050_ACCEL_SENS_8G		4096.0f	/* LSB/g  ← 与 ACCEL_FS_8 配套 */
+#define MPU6050_ACCEL_SENS_16G		2048.0f	/* LSB/g  ← 与 ACCEL_FS_16 配套 */
 
 /* 7 位 I2C 地址 (AD0 接地): 0x68 */
 #define MPU6050_7BIT_ADDRESS		0x68
