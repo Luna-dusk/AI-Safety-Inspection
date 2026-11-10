@@ -7,8 +7,10 @@ set(src_dirs
                 "MultiNet"
                 "LCD"
                 "ESP_NOW"
-                "AI_CHAT/AI_FRAMES" 
-                "AI_CHAT/Transport" 
+                "IMU"
+                "FALL_DET"
+                "AI_CHAT/AI_FRAMES"
+                "AI_CHAT/Transport"
                 "AI_CHAT/CHAT")
 
 
@@ -21,8 +23,10 @@ set(include_dirs
                 "MultiNet"
                 "LCD"
                 "ESP_NOW"
-                "AI_CHAT/AI_FRAMES" 
-                "AI_CHAT/Transport" 
+                "IMU"
+                "FALL_DET"
+                "AI_CHAT/AI_FRAMES"
+                "AI_CHAT/Transport"
                 "AI_CHAT/CHAT"
                 "AI_CHAT" )
 
@@ -42,6 +46,7 @@ set(requires
                 spiffs               # 兜底话术预录 PCM 存 storage 分区（A.8）
                 mbedtls
                 esp-sr
+                esp_websocket_client  # v2 长连接传输（附录 B，AI_CHAT/Transport）
                 # TODO(LCD): 以下两项等 LCD/ 目录拷过来、并在 main/idf_component.yml
                 # 加一行 `lvgl/lvgl: ~8.3.0`（与源工程 ai_client 一致）之后再解开。
                 # 现在 BSP 里既没有 LCD 源码也没有 lvgl 依赖，留着会直接让 CMake 解析失败。

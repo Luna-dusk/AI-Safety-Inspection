@@ -4,6 +4,7 @@
 #include "afe_sr.h"
 #include "multinet_cmd.h"
 #include "myesp_now.h"
+#include "fall_det.h"
 #include "chat.h"
 #include "my_client.h"
 #include "esp_log.h"
@@ -27,6 +28,31 @@ static void local_cmd_reply_cb(int cmd_id)
     ESP_LOGI(TAG, "local cmd %d reply -> prompt", cmd_id);
     /* TODO(录音): 为每条命令配专属提示音后按 cmd_id 选择文件 */
     ai_chat_request_prompt(PROMPT_CMD_OK);
+}
+
+/**
+ * @brief  跌倒/传感器事件回调（FR-3）
+ *
+ * 跑在 fall_det 任务上下文（优先级 8）——只做轻活，绝不播 I2S、
+ * 不发网络（拖死采集任务就漏真跌倒）。告警转发（ESP-NOW / 企业微信）
+ * 接入时在本函数里投队列/置标志，由对应任务消费。
+ */
+static void fall_det_evt_cb(fall_det_event_t evt, float pitch, float roll, void *ctx)
+{
+    (void)ctx;
+    switch (evt) {
+    case FALL_DET_EVT_FALL:
+        ESP_LOGW(TAG, ">>> FALL confirmed: pitch=%.1f roll=%.1f", pitch, roll);
+        /* TODO(告警): ESP-NOW 广播配对设备 + 播本地告警音 + 上报服务器 */
+        break;
+    case FALL_DET_EVT_SENSOR_FAULT:
+        ESP_LOGE(TAG, ">>> IMU sensor fault (L3)");
+        /* TODO(告警): FR-10 每日自检事件上报 */
+        break;
+    case FALL_DET_EVT_SENSOR_RECOVER:
+        ESP_LOGI(TAG, ">>> IMU sensor recovered");
+        break;
+    }
 }
 
 void app_main(void)
@@ -61,6 +87,13 @@ void app_main(void)
     multinet_cmd_set_reply_cb(local_cmd_reply_cb);
     if (xTaskCreate(ai_chat_task, "ai_chat", 8192, s_pcm_queue, 12, NULL) != pdPASS) {
         ESP_LOGE(TAG, "create ai_chat task failed");
+    }
+
+    /* 6. 跌倒检测（FR-3）：内部自建 50Hz 任务（核 1，优先级 8），
+     *    初始化含最长 ~12s 的零偏校准，全部在任务里做，不阻塞启动序列。
+     *    传感器不在也不报错——恢复阶梯持续重试并回调 FAULT。 */
+    if (fall_det_start(fall_det_evt_cb, NULL) != ESP_OK) {
+        ESP_LOGE(TAG, "fall detect start failed");
     }
 
     ESP_LOGI(TAG, "app_main done, all tasks running");
