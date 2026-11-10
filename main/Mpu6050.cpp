@@ -22,8 +22,8 @@
  *   3. 顺带解决一个编译问题：legacy 的 i2c_config_t 要写 .master.clk_speed，
  *      而 C++ 不允许嵌套指定初始化器，原写法在 .cpp 里必定编不过。 */
 
-#define I2C_SDA_GPIO 8
-#define I2C_SCL_GPIO 9
+#define I2C_SDA_GPIO 41
+#define I2C_SCL_GPIO 42
 
 /* 400kHz：100kHz 下两颗传感器 50Hz 就占掉约 13% 带宽，留给触摸的余量太少 */
 #define I2C_MASTER_FREQ_HZ 400000

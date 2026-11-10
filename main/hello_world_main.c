@@ -46,8 +46,8 @@
  * （HMC5883L 才是 1090 LSB/G，别抄错型号） */
 #define QMC5883_LSB_PER_UT	30.0f
 
-/* 磁偏角：西安约 −3.5°，指北针读数加上它才是真北。换地方要重新填 */
-static float QMC5883_Declination = -3.5f;
+/* 磁偏角：湖南约 −4.8°，指北针读数加上它才是真北。换地方要重新填 */
+static float QMC5883_Declination = -4.8f;
 
 /* ---- 校准门控 ---- */
 #define CALI_ACC_TOL_G		0.10f	/* ‖a‖ 偏离 1g 超过这个值 → 认为在动 */
