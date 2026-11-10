@@ -16,3 +16,4 @@ dependencies:
   #   public: true
   espressif/openai: ^1.1.0
   espressif/mdns: ^1.11.1
+  espressif/esp-sr: "2.4.6"

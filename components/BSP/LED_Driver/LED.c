@@ -1,5 +1,16 @@
 #include "LED.h"
 
+/**
+ * @brief  初始化状态指示灯（GPIO1）
+ *
+ * 配置为 GPIO_MODE_INPUT_OUTPUT：
+ *   - 输出侧用于点灯；
+ *   - 保留输入能力是为了让 LED_TOGGLE() 能通过 gpio_get_level() 回读当前状态，
+ *     否则反相操作会读到 0，导致灯永远点不亮。
+ * 内部上拉使能，默认输出低电平（熄灭）。
+ *
+ * @note 若改为 LEDC/PWM 调光，LED_TOGGLE() 的回读方式要一并改掉。
+ */
 void LED_Init(void)
 {
     // Initialize the GPIO pin for the LED

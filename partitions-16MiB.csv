@@ -1,7 +1,16 @@
 # ESP-IDF Partition Table
-# Name, Type, SubType, Offset, Size, Flags
-nvs,data,nvs,0x9000,0x6000,,
-phy_init,data,phy,0xf000,0x1000,,
-factory,app,factory,0x10000,0x1F0000,,
-vfs,data,fat,0x200000,0xA00000,,
-storage,data,spiffs,0xc00000,0x400000,,
+# 16 MB flash (ESP32-S3-WROOM-1-N16R8)
+#
+# 说明：
+#   factory 1.9MB -> 4MB    : esp-sr + esp-dl 让固件显著变大，原 1.9MB 会装不下
+#   model   新增 4MB        : esp-sr 模型分区，名字必须是 "model"
+#                              (esp_srmodel_init("model") 按 label 查找)
+#   vfs     删除            : FAT 10MB，代码中无任何 esp_vfs_fat 引用
+#   storage 4MB -> 8MB      : SPIFFS，存放提示音/字体/日志
+#
+# Name,     Type, SubType,  Offset,    Size,      Flags
+nvs,        data, nvs,      0x9000,    0x6000,
+phy_init,   data, phy,      0xf000,    0x1000,
+factory,    app,  factory,  0x10000,   0x400000,
+model,      data, spiffs,   0x410000,  0x400000,
+storage,    data, spiffs,   0x810000,  0x7F0000,

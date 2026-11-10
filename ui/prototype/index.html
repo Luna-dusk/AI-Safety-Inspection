@@ -1,0 +1,749 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI 安全监护对讲 · UI 原型 240×320</title>
+<style>
+  :root{
+    --bg:#0B1116; --surface:#151D24; --surface2:#1C262E; --line:#2B3842;
+    --text:#F2F7FA; --muted:#A8B9C4; --accent:#3DDC97; --amber:#FFB020; --red:#FF5A5F;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:#070B0E; color:#DCE7EF;
+    font:14px/1.5 "Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  }
+  header{padding:22px 26px 10px}
+  header h1{margin:0 0 6px; font-size:17px; font-weight:600; letter-spacing:.02em}
+  header p{margin:0; color:#7E909C; font-size:12.5px}
+  header code{color:#9FB6C4; background:#111A20; padding:1px 5px; border-radius:4px}
+  main{display:flex; gap:34px; align-items:flex-start; padding:14px 26px 60px; flex-wrap:wrap}
+  .stage{display:flex; gap:18px; align-items:flex-start}
+  .device{
+    padding:11px; border-radius:26px; background:linear-gradient(160deg,#232B31,#0E1418);
+    box-shadow:0 18px 50px rgba(0,0,0,.6), inset 0 0 0 1px rgba(255,255,255,.06);
+  }
+  .device svg{display:block; border-radius:6px; background:#000; cursor:default}
+  .zoom{display:flex; flex-direction:column; gap:6px; padding-top:6px}
+  .zoom button{font:12px/1 inherit; padding:6px 9px; border-radius:6px}
+
+  .panel{width:260px; display:flex; flex-direction:column; gap:16px}
+  .panel section{border:1px solid #1B252C; border-radius:10px; padding:12px 13px; background:#0C1318}
+  .panel h2{margin:0 0 9px; font-size:11px; letter-spacing:.12em; color:#6E8593; font-weight:600; text-transform:uppercase}
+  .row{display:flex; gap:6px; flex-wrap:wrap}
+  button{
+    font:12.5px/1.2 inherit; color:#C6D5DF; background:#162027; border:1px solid #24313A;
+    border-radius:7px; padding:7px 10px; cursor:pointer;
+  }
+  button:hover{border-color:#3A4B57; color:#EAF4FA}
+  button.on{background:#12301F; border-color:#2E7D57; color:#66E9B4}
+  .note{color:#6E8593; font-size:11.5px; line-height:1.6; margin:8px 0 0}
+  .toast{
+    position:fixed; left:50%; bottom:26px; transform:translateX(-50%) translateY(8px);
+    background:#162027; border:1px solid #2B3A44; color:#CFE0EA; padding:9px 15px; border-radius:999px;
+    font-size:12.5px; opacity:0; pointer-events:none; transition:.18s;
+  }
+  .toast.show{opacity:1; transform:translateX(-50%) translateY(0)}
+
+  body.bare{background:#000}
+  body.bare header, body.bare .panel, body.bare .zoom{display:none}
+  body.bare main{padding:0}
+  body.bare .stage{gap:0}
+  body.bare .device{border-radius:0; padding:0; background:#000; box-shadow:none}
+  body.bare .device svg{border-radius:0}
+  #overview{display:none; padding:10px 26px 70px}
+  #overview.on{display:block}
+  #overview h2{font-size:13px; color:#8FA2AE; font-weight:500; margin:16px 0 12px}
+  .sheet{display:flex; flex-wrap:wrap; gap:20px}
+  .sheet figure{margin:0; display:flex; flex-direction:column; gap:7px}
+  .sheet figcaption{font-size:11.5px; color:#7E909C}
+  .sheet svg{border-radius:4px; box-shadow:0 6px 18px rgba(0,0,0,.5)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>AI 安全监护对讲 · 触摸屏 UI 原型</h1>
+  <p>240 × 320 竖屏 ｜ 圆角卡片 ｜ 8 个界面可点击跳转 ｜ 纯静态 SVG，无渐变/阴影/滤镜，便于 1:1 移植到 LVGL</p>
+</header>
+
+<main>
+  <div class="stage">
+    <div class="device">
+      <!-- ===================== 唯一的 SVG 画布 240×320 ===================== -->
+      <svg id="ui" viewBox="0 0 240 320" width="480" height="640" xmlns="http://www.w3.org/2000/svg">
+      <style>
+        svg{font-family:"Noto Sans SC","Source Han Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+            -webkit-font-smoothing:antialiased; text-rendering:geometricPrecision}
+        text{fill:#F2F7FA; font-size:12px}
+        .f12{font-size:12px}.f16{font-size:16px}.f20{font-size:20px}.f28{font-size:28px}
+        .muted{fill:#A8B9C4}.dim{fill:#8496A2}.teal{fill:#3DDC97}.amber{fill:#FFB020}
+        .red{fill:#FF5A5F}.pink{fill:#FFB3B3}.soft{fill:#C9D6DF}
+        .mid{text-anchor:middle}.end{text-anchor:end}
+        .card{fill:#151D24; stroke:#2B3842; stroke-width:1}
+        .hit{fill:transparent}
+        .ic{fill:none; stroke:currentColor; stroke-width:1.4; stroke-linecap:round; stroke-linejoin:round}
+        .icf{fill:currentColor; stroke:none}
+        .screen{display:none}
+        .screen.on{display:inline}
+        .peer-off{display:none}
+        svg[data-peer="offline"] .peer-on{display:none}
+        svg[data-peer="offline"] .peer-off{display:inline}
+        .tap{cursor:pointer}
+        .tap:active{opacity:.72}
+      </style>
+
+      <!-- ===================== 图标库（16×16 局部坐标） ===================== -->
+      <defs>
+        <g id="i-bell" class="ic">
+          <path d="M8 2.4a3.9 3.9 0 00-3.9 3.9v2.9L2.7 11.5h10.6L11.9 9.2V6.3A3.9 3.9 0 008 2.4z"/>
+          <path d="M6.5 13.1a1.6 1.6 0 003 0"/>
+        </g>
+        <g id="i-chat" class="ic">
+          <path d="M3.2 3.2h9.6a1.2 1.2 0 011.2 1.2v5.2a1.2 1.2 0 01-1.2 1.2H7.7L4.5 13.2v-2.4H3.2A1.2 1.2 0 012 9.6V4.4a1.2 1.2 0 011.2-1.2z"/>
+        </g>
+        <g id="i-alert" class="ic">
+          <circle cx="8" cy="8" r="6.3"/>
+          <path d="M8 4.7v3.9"/>
+          <circle cx="8" cy="11.3" r=".85" fill="currentColor" stroke="none"/>
+        </g>
+        <g id="i-mic" class="ic">
+          <rect x="5.7" y="1.7" width="4.6" height="7.1" rx="2.3"/>
+          <path d="M2.9 7.3a5.1 5.1 0 0010.2 0M8 12.4v1.9"/>
+        </g>
+        <g id="i-shield" class="ic">
+          <path d="M8 1.6l5.1 2v4.1c0 3.1-2.1 5.5-5.1 6.5-3-1-5.1-3.4-5.1-6.5V3.6L8 1.6z"/>
+        </g>
+        <g id="i-grid" class="ic">
+          <rect x="1.6" y="1.6" width="5.6" height="5.6" rx="1.6"/>
+          <rect x="8.8" y="1.6" width="5.6" height="5.6" rx="1.6"/>
+          <rect x="1.6" y="8.8" width="5.6" height="5.6" rx="1.6"/>
+          <rect x="8.8" y="8.8" width="5.6" height="5.6" rx="1.6"/>
+        </g>
+        <g id="i-gear" class="ic">
+          <circle cx="8" cy="8" r="6.2"/>
+          <circle cx="8" cy="8" r="2.4"/>
+          <path d="M8 .9v1.7M8 13.4v1.7M.9 8h1.7M13.4 8h1.7M3 3l1.2 1.2M11.8 11.8l1.2 1.2M13 3l-1.2 1.2M4.2 11.8L3 13"/>
+        </g>
+        <g id="i-back" class="ic"><path d="M10 3.4L5.4 8l4.6 4.6"/></g>
+        <g id="i-chev" class="ic"><path d="M6.2 3.4L10.8 8l-4.6 4.6"/></g>
+        <g id="i-check" class="ic"><path d="M3 8.6l3.4 3.3L13 4.6"/></g>
+        <g id="i-clock" class="ic">
+          <circle cx="8" cy="8" r="6.3"/><path d="M8 4.3V8l2.6 1.7"/>
+        </g>
+        <g id="i-fall" class="ic">
+          <circle cx="9.7" cy="4" r="1.8"/>
+          <path d="M9.7 6.2l-2.5 3.4H4.1M9.7 6.6l2.9 2.2M2 12.9h12"/>
+        </g>
+        <g id="i-off" class="ic">
+          <path d="M2.6 2.6l10.8 10.8"/>
+          <path d="M4.7 6.1a7.6 7.6 0 013.3-1.4M11 5.3c.5.2 1 .4 1.5.8M6.7 9.4c.8-.4 1.7-.4 2.5 0"/>
+          <circle cx="8" cy="12.1" r=".85" fill="currentColor" stroke="none"/>
+        </g>
+        <g id="i-phone" class="ic">
+          <rect x="5" y="1.8" width="6" height="12.4" rx="1.5"/><path d="M7 12.5h2"/>
+        </g>
+
+        <!-- 状态栏：时间 / 信号 / 电量 -->
+        <g id="sb">
+          <text class="f12 muted" x="12" y="21">08:24</text>
+          <g transform="translate(158,11)" style="color:#3DDC97">
+            <rect x="0" y="7" width="3" height="4" rx="1" fill="currentColor"/>
+            <rect x="5" y="4.5" width="3" height="6.5" rx="1" fill="currentColor"/>
+            <rect x="10" y="2" width="3" height="9" rx="1" fill="currentColor"/>
+          </g>
+          <g transform="translate(176,12)">
+            <rect x="0" y="0" width="18" height="10" rx="3" fill="none" stroke="#8496A2"/>
+            <rect x="2" y="2" width="12" height="6" rx="1.5" fill="#3DDC97"/>
+            <rect x="19.4" y="3.2" width="2" height="3.6" rx="1" fill="#8496A2"/>
+          </g>
+          <text class="f12 muted end" x="232" y="21">82%</text>
+        </g>
+      </defs>
+
+      <!-- ============================================================ 1. 主屏 -->
+      <g class="screen on" id="s-home" data-name="主屏 · 守护">
+        <rect width="240" height="320" fill="#0B1116"/>
+        <use href="#sb"/>
+
+        <!-- 守护状态大卡：监护中 / 静默计时 / 电量·信号 三项一眼可见（FR-10） -->
+        <g class="tap" data-go="events">
+          <rect class="card" x="8" y="32" width="224" height="104" rx="14"/>
+          <circle cx="56" cy="84" r="30" fill="none" stroke="#223038" stroke-width="5"/>
+          <circle cx="56" cy="84" r="30" fill="none" stroke="#3DDC97" stroke-width="5"/>
+          <use href="#i-check" transform="translate(48,76)" style="color:#3DDC97"/>
+
+          <circle cx="102" cy="57" r="4.5" fill="#3DDC97"/>
+          <text class="f20" x="112" y="64">监护中</text>
+          <text class="f16" x="100" y="88">已静默 12 分钟</text>
+
+          <!-- 电量 + 信号：主卡内 12px 图标行，不只靠状态栏 -->
+          <g transform="translate(100,96)">
+            <rect x="0" y="0" width="18" height="10" rx="3" fill="none" stroke="#A8B9C4"/>
+            <rect x="2" y="2" width="12" height="6" rx="1.5" fill="#3DDC97"/>
+            <rect x="19.4" y="3.2" width="2" height="3.6" rx="1" fill="#A8B9C4"/>
+          </g>
+          <text class="f12 muted" x="124" y="106">82%</text>
+          <g transform="translate(154,96)" style="color:#3DDC97">
+            <rect x="0" y="7" width="3" height="4" rx="1" fill="currentColor"/>
+            <rect x="5" y="4.5" width="3" height="6.5" rx="1" fill="currentColor"/>
+            <rect x="10" y="2" width="3" height="9" rx="1" fill="currentColor"/>
+          </g>
+          <text class="f12 muted" x="172" y="106">信号良好</text>
+        </g>
+
+        <!-- 事件 / AI -->
+        <g class="tap" data-go="events">
+          <rect class="card" x="8" y="142" width="108" height="60" rx="12"/>
+          <use href="#i-bell" transform="translate(20,158)" style="color:#A8B9C4"/>
+          <text class="f16" x="42" y="173">事件</text>
+          <text class="f12 amber" x="20" y="193">2 条未读</text>
+        </g>
+        <g class="tap" data-go="chat">
+          <rect class="card" x="124" y="142" width="108" height="60" rx="12"/>
+          <use href="#i-chat" transform="translate(136,158)" style="color:#A8B9C4"/>
+          <text class="f16" x="158" y="173">AI 对话</text>
+          <text class="f12 muted" x="136" y="193">说“你好小鑫”</text>
+        </g>
+
+        <!-- 紧急呼救：全屏唯一的红 -->
+        <g class="tap" data-go="sos">
+          <rect x="8" y="208" width="224" height="56" rx="14" fill="#241013" stroke="#7A3136"/>
+          <use href="#i-alert" transform="translate(22,216)" style="color:#FF6B70"/>
+          <text class="f20" x="48" y="233" style="fill:#FF8A8A">紧急呼救</text>
+          <text class="f12" x="48" y="253" style="fill:#C99BA0">长按 3 秒，通知家人和对方</text>
+          <use href="#i-chev" transform="translate(212,228)" style="color:#C99BA0"/>
+        </g>
+
+        <!-- 底部导航 -->
+        <rect x="0" y="272" width="240" height="48" fill="#0F161C"/>
+        <line x1="0" y1="272.5" x2="240" y2="272.5" stroke="#1A242C"/>
+        <g class="tap" data-go="home">
+          <rect class="hit" x="0" y="272" width="60" height="48"/>
+          <use href="#i-shield" transform="translate(22,284)" style="color:#3DDC97"/>
+          <text class="teal mid" x="30" y="313">守护</text>
+        </g>
+        <g class="tap" data-go="talk">
+          <rect class="hit" x="60" y="272" width="60" height="48"/>
+          <use href="#i-mic" transform="translate(82,284)" style="color:#A8B9C4"/>
+          <text class="dim mid" x="90" y="313">对讲</text>
+        </g>
+        <g class="tap" data-go="apps">
+          <rect class="hit" x="120" y="272" width="60" height="48"/>
+          <use href="#i-grid" transform="translate(142,284)" style="color:#A8B9C4"/>
+          <text class="dim mid" x="150" y="313">应用</text>
+        </g>
+        <g class="tap" data-go="settings">
+          <rect class="hit" x="180" y="272" width="60" height="48"/>
+          <use href="#i-gear" transform="translate(202,284)" style="color:#A8B9C4"/>
+          <text class="dim mid" x="210" y="313">设置</text>
+        </g>
+      </g>
+
+      <!-- ============================================================ 2. 对讲 -->
+      <g class="screen" id="s-talk" data-name="对讲 · 双机">
+        <rect width="240" height="320" fill="#0B1116"/>
+        <use href="#sb"/>
+        <g class="tap" data-back="1">
+          <rect class="hit" x="2" y="30" width="40" height="30"/>
+          <use href="#i-back" transform="translate(12,37)" style="color:#C9D6DF"/>
+        </g>
+        <text class="f16" x="40" y="50">对讲</text>
+
+        <!-- 对端状态：在线 -->
+        <g class="peer-on">
+          <rect class="card" x="8" y="62" width="224" height="60" rx="12"/>
+          <use href="#i-phone" transform="translate(18,78)" style="color:#3DDC97"/>
+          <use href="#i-phone" transform="translate(38,78)" style="color:#3DDC97"/>
+          <circle cx="56" cy="76" r="3" fill="#3DDC97"/>
+          <text class="f16" x="66" y="82">客厅设备</text>
+          <text class="f12 muted" x="66" y="102">同一网络 · 约 3 米</text>
+          <text class="f12 muted end" x="224" y="102">电量 64%</text>
+        </g>
+        <!-- 对端状态：不在同一网络（FR-4 明确提示，禁止静默失效） -->
+        <g class="peer-off">
+          <rect x="8" y="62" width="224" height="60" rx="12" fill="#251A0C" stroke="#7A5622"/>
+          <g transform="translate(18,78)">
+            <use href="#i-off" style="color:#FFB020"/>
+          </g>
+          <text class="f16" x="48" y="82" style="fill:#FFC46B">对方不在同一网络</text>
+          <text class="f12" x="48" y="102" style="fill:#C9A070">请让两台连接同一个 WiFi</text>
+        </g>
+
+        <!-- PTT：在线=绿色可用+显式挂断；离线=降饱和禁用、不响应，同屏只允许一个结论 -->
+        <g class="peer-on">
+          <g class="tap" data-toast="按住说话，松开结束">
+            <circle cx="120" cy="172" r="48" fill="#16302A" stroke="#3DDC97" stroke-width="2"/>
+            <circle cx="120" cy="172" r="40" fill="none" stroke="#2C5A4A"/>
+            <use href="#i-mic" transform="translate(112,146)" style="color:#3DDC97"/>
+            <text class="f16 mid" x="120" y="194" style="fill:#DDF7EE">按住说话</text>
+          </g>
+          <text class="f12 muted" x="20" y="239">通话中 00:12</text>
+          <g class="tap" data-toast="已挂断">
+            <rect x="164" y="224" width="68" height="22" rx="11" fill="#2A1216" stroke="#7A3136"/>
+            <text class="f12 mid" x="198" y="239" style="fill:#FF8A8A">挂断</text>
+          </g>
+        </g>
+        <g class="peer-off">
+          <circle cx="120" cy="172" r="48" fill="#141B20" stroke="#38444D" stroke-width="2"/>
+          <circle cx="120" cy="172" r="40" fill="none" stroke="#26313A"/>
+          <use href="#i-off" transform="translate(112,146)" style="color:#7C8B96"/>
+          <text class="f16 mid" x="120" y="194" style="fill:#93A3B0">暂时无法呼叫</text>
+          <text class="f12 mid" x="120" y="238" style="fill:#C9A070">等待对方回到同一网络</text>
+        </g>
+
+        <g class="tap" data-toast="音量三档：老人模式 ≥ 85 dB">
+          <rect class="card" x="8" y="250" width="108" height="46" rx="12"/>
+          <text class="f12 muted" x="20" y="268">音量</text>
+          <text class="f16" x="20" y="288">三档</text>
+          <g transform="translate(88,264)" style="color:#3DDC97">
+            <rect x="0" y="14" width="3" height="6" rx="1.5" fill="currentColor"/>
+            <rect x="6" y="9" width="3" height="11" rx="1.5" fill="currentColor"/>
+            <rect x="12" y="4" width="3" height="16" rx="1.5" fill="#2C3B45"/>
+          </g>
+        </g>
+        <g class="tap" data-toast="免按键说话（语音触发）开关">
+          <rect class="card" x="124" y="250" width="108" height="46" rx="12"/>
+          <text class="f12 muted" x="136" y="268">免按键说话</text>
+          <rect x="186" y="276" width="32" height="18" rx="9" fill="#3DDC97"/>
+          <circle cx="209" cy="285" r="7" fill="#0B1116"/>
+        </g>
+      </g>
+
+      <!-- ============================================================ 3. 呼救中 -->
+      <g class="screen" id="s-sos" data-name="紧急呼救 · 多渠道投递">
+        <rect width="240" height="320" fill="#1A0D10"/>
+        <text class="f20 mid" x="120" y="42" style="fill:#FF8A8A">正在呼叫家人</text>
+
+        <!-- 倒计时是这一屏的主角 -->
+        <circle cx="120" cy="96" r="32" fill="none" stroke="#4A1F24" stroke-width="5"/>
+        <circle cx="120" cy="96" r="32" fill="none" stroke="#FF5A5F" stroke-width="5"
+                stroke-linecap="round" stroke-dasharray="161 201" transform="rotate(-90 120 96)"/>
+        <text class="f28 mid" x="120" y="106" style="font-weight:600">10</text>
+        <text class="f12 mid" x="120" y="148" style="fill:#DBA9AE">秒后自动通知家属</text>
+
+        <g>
+          <rect x="8" y="160" width="224" height="30" rx="10" fill="#2A1216"/>
+          <use href="#i-check" transform="translate(20,167)" style="color:#3DDC97"/>
+          <text class="f12" x="42" y="179" style="fill:#E6C9CC">本机声光报警</text>
+          <text class="f12 teal end" x="224" y="179">已响铃</text>
+        </g>
+        <g>
+          <rect x="8" y="194" width="224" height="30" rx="10" fill="#2A1216"/>
+          <use href="#i-check" transform="translate(20,201)" style="color:#3DDC97"/>
+          <text class="f12" x="42" y="213" style="fill:#E6C9CC">客厅设备</text>
+          <text class="f12 teal end" x="224" y="213">已同步</text>
+        </g>
+        <g>
+          <rect x="8" y="228" width="224" height="30" rx="10" fill="#2A1216"/>
+          <circle cx="28" cy="243" r="4.5" fill="none" stroke="#FFB020" stroke-width="1.6"/>
+          <text class="f12" x="42" y="247" style="fill:#E6C9CC">家庭微信群</text>
+          <text class="f12 amber end" x="224" y="247">发送中</text>
+        </g>
+
+        <!-- 取消与触发对称：同样要长按，左侧环形进度提示 -->
+        <g class="tap" data-back="1" data-toast="已取消呼救，家属未被通知">
+          <rect x="8" y="266" width="224" height="46" rx="12" fill="#241013" stroke="#7A3A3F"/>
+          <circle cx="44" cy="289" r="13" fill="none" stroke="#4A1F24" stroke-width="3"/>
+          <circle cx="44" cy="289" r="13" fill="none" stroke="#FF8A8A" stroke-width="3"
+                  stroke-linecap="round" stroke-dasharray="37 82" transform="rotate(-90 44 289)"/>
+          <text class="f16" x="68" y="288" style="fill:#FFB3B3">我没事 · 取消报警</text>
+          <text class="f12" x="68" y="306" style="fill:#C99BA0">长按 3 秒才生效</text>
+        </g>
+      </g>
+
+      <!-- ============================================================ 4. 收到告警 -->
+      <g class="screen" id="s-alarm" data-name="收到告警 · 对端跌倒">
+        <rect width="240" height="320" fill="#1A0D10"/>
+        <text class="f12 mid" x="120" y="34" style="fill:#DBA9AE">收到告警</text>
+        <text class="f28 mid" x="120" y="76" style="fill:#FF6B70;font-weight:600">跌倒</text>
+        <text class="f16 mid" x="120" y="102">客厅设备 · 卫生间</text>
+        <text class="f12 mid" x="120" y="124" style="fill:#DBA9AE">距离约 12 米 · 08:24</text>
+
+        <rect x="8" y="140" width="224" height="76" rx="12" fill="#2A1216" stroke="#5A2429"/>
+        <use href="#i-alert" transform="translate(20,156)" style="color:#FFB020"/>
+        <text class="f16" x="42" y="164" style="fill:#FFC46B">跌倒后 12 秒无动作</text>
+        <text class="f12" x="42" y="186" style="fill:#E6C9CC">可能昏迷，建议立即查看</text>
+        <text class="f12" x="42" y="206" style="fill:#FFC46B">10 秒后转为连续强提醒</text>
+
+        <g class="tap" data-go="talk">
+          <rect x="8" y="228" width="108" height="44" rx="12" fill="none" stroke="#5A3A3F"/>
+          <text class="f16 mid" x="62" y="256" style="fill:#E6C9CC">对讲询问</text>
+        </g>
+        <g class="tap" data-back="1">
+          <rect x="124" y="228" width="108" height="44" rx="12" fill="#3DDC97"/>
+          <text class="f16 mid" x="178" y="256" style="fill:#0B1116">我已到场</text>
+        </g>
+        <text class="f12 mid" x="120" y="296" style="fill:#C99BA0">家人确认后，两台设备同时停止响铃</text>
+      </g>
+
+      <!-- ============================================================ 5. 事件记录 -->
+      <g class="screen" id="s-events" data-name="事件记录">
+        <rect width="240" height="320" fill="#0B1116"/>
+        <use href="#sb"/>
+        <g class="tap" data-back="1">
+          <rect class="hit" x="2" y="30" width="40" height="30"/>
+          <use href="#i-back" transform="translate(12,37)" style="color:#C9D6DF"/>
+        </g>
+        <text class="f16" x="40" y="50">事件记录</text>
+
+        <!-- 筛选：32 高，间隔 8，可盲按 -->
+        <rect x="8" y="56" width="60" height="32" rx="16" fill="#152A22" stroke="#2E7D57"/>
+        <text class="f12 teal mid" x="38" y="76">全部</text>
+        <rect x="76" y="56" width="60" height="32" rx="16" fill="none" stroke="#2B3842"/>
+        <text class="f12 muted mid" x="106" y="76">告警</text>
+        <rect x="144" y="56" width="60" height="32" rx="16" fill="none" stroke="#2B3842"/>
+        <text class="f12 muted mid" x="174" y="76">提醒</text>
+
+        <!-- 行 1：卡面整张变红 + 红标题，不读字也能认出最严重的一条 -->
+        <g class="tap" data-go="alarm">
+          <rect x="8" y="94" width="224" height="48" rx="12" fill="#1F1116" stroke="#5A2429"/>
+          <circle cx="30" cy="118" r="12" fill="#33161B"/>
+          <use href="#i-fall" transform="translate(22,110)" style="color:#FF6B70"/>
+          <text class="f16" x="52" y="114" style="fill:#FF8A8A">跌倒告警</text>
+          <circle cx="124" cy="109" r="3.5" fill="#FF5A5F"/>
+          <text class="f12" x="52" y="132" style="fill:#FFC46B">待处理 · 卫生间</text>
+          <text class="f12 end" x="224" y="114" style="fill:#B48C90">08:12</text>
+        </g>
+        <!-- 行 2 -->
+        <g class="tap" data-toast="事件详情（回执、时间线、音频回放）">
+          <rect class="card" x="8" y="150" width="224" height="48" rx="12"/>
+          <circle cx="30" cy="174" r="12" fill="#2A1216"/>
+          <use href="#i-mic" transform="translate(22,166)" style="color:#FF6B70"/>
+          <text class="f16" x="52" y="170">关键词呼救</text>
+          <circle cx="144" cy="165" r="3.5" fill="#FF5A5F"/>
+          <text class="f12 muted" x="52" y="188">“救命” · 已撤销</text>
+          <text class="f12 end" x="224" y="170" style="fill:#8496A2">07:58</text>
+        </g>
+        <!-- 行 3 -->
+        <g class="tap" data-toast="事件详情（静默计时、提醒记录）">
+          <rect class="card" x="8" y="206" width="224" height="48" rx="12"/>
+          <circle cx="30" cy="230" r="12" fill="#251A0C"/>
+          <use href="#i-clock" transform="translate(22,222)" style="color:#FFB020"/>
+          <text class="f16" x="52" y="226">静默提醒</text>
+          <text class="f12 muted" x="52" y="244">已通知家属</text>
+          <text class="f12 end" x="224" y="226" style="fill:#8496A2">07:20</text>
+        </g>
+        <!-- 行 4 -->
+        <g class="tap" data-toast="事件详情（设备在线状态）">
+          <rect class="card" x="8" y="262" width="224" height="48" rx="12"/>
+          <circle cx="30" cy="286" r="12" fill="#251A0C"/>
+          <use href="#i-off" transform="translate(22,278)" style="color:#FFB020"/>
+          <text class="f16" x="52" y="282">对方失联</text>
+          <text class="f12 muted" x="52" y="300">已恢复</text>
+          <text class="f12 end" x="224" y="282" style="fill:#8496A2">06:40</text>
+        </g>
+      </g>
+
+      <!-- ============================================================ 6. 应用商店 -->
+      <g class="screen" id="s-apps" data-name="应用商店">
+        <rect width="240" height="320" fill="#0B1116"/>
+        <use href="#sb"/>
+        <g class="tap" data-back="1">
+          <rect class="hit" x="2" y="30" width="40" height="30"/>
+          <use href="#i-back" transform="translate(12,37)" style="color:#C9D6DF"/>
+        </g>
+        <text class="f16" x="40" y="50">应用商店</text>
+
+        <!-- 应用 1：数字方块（叠层色块 = 合并） -->
+        <g class="tap" data-toast="数字方块：装完即玩，不重启">
+          <rect class="card" x="8" y="62" width="108" height="114" rx="16"/>
+          <rect x="22" y="76" width="32" height="32" rx="10" fill="#16302A"/>
+          <rect x="27" y="81" width="10" height="10" rx="3" fill="#3DDC97" opacity=".45"/>
+          <rect x="39" y="81" width="10" height="10" rx="3" fill="#3DDC97" opacity=".45"/>
+          <rect x="27" y="93" width="22" height="10" rx="3" fill="#3DDC97"/>
+          <rect x="60" y="78" width="44" height="20" rx="10" fill="none" stroke="#2E7D57"/>
+          <text class="f12 teal mid" x="82" y="92">安装</text>
+          <text class="f16" x="22" y="140">数字方块</text>
+          <text class="f12 muted" x="22" y="160">1.8 MB</text>
+        </g>
+        <!-- 应用 2：贪吃蛇（已安装） -->
+        <g class="tap" data-toast="贪吃蛇：已安装，可直接卸载">
+          <rect class="card" x="124" y="62" width="108" height="114" rx="16"/>
+          <rect x="138" y="76" width="32" height="32" rx="10" fill="#251A0C"/>
+          <path d="M141 100h7v-7h7v-7h7" fill="none" stroke="#FFB020" stroke-width="2.6"
+                stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="164" cy="101" r="2.6" fill="#FF5A5F"/>
+          <rect x="176" y="78" width="44" height="20" rx="10" fill="#1E2A33"/>
+          <text class="f12 mid" x="198" y="92" style="fill:#A8B9C4">已安装</text>
+          <text class="f16" x="138" y="140">贪吃蛇</text>
+          <text class="f12 muted" x="138" y="160">0.9 MB</text>
+        </g>
+        <!-- 应用 3：记忆配对（一张明牌一张暗牌） -->
+        <g class="tap" data-toast="记忆配对：适合认知训练">
+          <rect class="card" x="8" y="184" width="108" height="114" rx="16"/>
+          <rect x="22" y="198" width="32" height="32" rx="10" fill="#1B1A2E"/>
+          <rect x="26" y="203" width="12" height="22" rx="3" fill="none" stroke="#A48CFF" stroke-width="1.4"/>
+          <text x="32" y="219" style="fill:#A48CFF;font-size:12px;text-anchor:middle">★</text>
+          <rect x="40" y="203" width="12" height="22" rx="3" fill="#A48CFF" opacity=".18"/>
+          <text x="46" y="219" style="fill:#A48CFF;font-size:12px;text-anchor:middle">?</text>
+          <rect x="60" y="200" width="44" height="20" rx="10" fill="none" stroke="#2E7D57"/>
+          <text class="f12 teal mid" x="82" y="214">安装</text>
+          <text class="f16" x="22" y="262">记忆配对</text>
+          <text class="f12 muted" x="22" y="282">2.4 MB</text>
+        </g>
+        <!-- 应用 4：反应力 -->
+        <g class="tap" data-toast="反应力训练">
+          <rect class="card" x="124" y="184" width="108" height="114" rx="16"/>
+          <rect x="138" y="198" width="32" height="32" rx="10" fill="#2A1216"/>
+          <path d="M155 201l-7 11h6l-3 10 9-13h-6z" fill="#FF5A5F"/>
+          <rect x="176" y="200" width="44" height="20" rx="10" fill="none" stroke="#2E7D57"/>
+          <text class="f12 teal mid" x="198" y="214">安装</text>
+          <text class="f16" x="138" y="262">反应力</text>
+          <text class="f12 muted" x="138" y="282">1.2 MB</text>
+        </g>
+      </g>
+
+      <!-- ============================================================ 7. AI 对话 -->
+      <g class="screen" id="s-chat" data-name="AI 对话 · 操作确认">
+        <rect width="240" height="320" fill="#0B1116"/>
+        <use href="#sb"/>
+        <g class="tap" data-back="1">
+          <rect class="hit" x="2" y="30" width="40" height="30"/>
+          <use href="#i-back" transform="translate(12,37)" style="color:#C9D6DF"/>
+        </g>
+        <text class="f16" x="40" y="50">小鑫</text>
+        <text class="f12 muted end" x="232" y="50">语音助手</text>
+
+        <!-- 用户 -->
+        <rect x="92" y="62" width="140" height="30" rx="12" fill="#1B3A33"/>
+        <text class="f12" x="104" y="82" style="fill:#DDF7EE">我降压药还剩几天？</text>
+
+        <!-- AI -->
+        <rect class="card" x="8" y="100" width="184" height="56" rx="12"/>
+        <text class="f12" x="20" y="122" style="fill:#DCE7EF">上次补药是 10 月 28 日，</text>
+        <text class="f12" x="20" y="142" style="fill:#DCE7EF">每天一片，还剩 6 片。</text>
+
+        <!-- 二次确认卡（FR-8）：单一字号层级，行距拉开 -->
+        <rect x="8" y="160" width="224" height="104" rx="12" fill="#241B0F" stroke="#6B4A1F"/>
+        <text class="f16" x="20" y="190">给女儿发邮件：买降压药</text>
+        <text class="f12" x="20" y="214" style="fill:#C9A070">说“确认”发送</text>
+        <g class="tap" data-toast="已取消，邮件未发送">
+          <rect x="120" y="228" width="52" height="28" rx="9" fill="none" stroke="#5A4630"/>
+          <text class="f12 mid" x="146" y="247" style="fill:#C9A070">取消</text>
+        </g>
+        <g class="tap" data-toast="已确认，正在发送邮件">
+          <rect x="176" y="228" width="52" height="28" rx="9" fill="#FFB020"/>
+          <text class="f12 mid" x="202" y="247" style="fill:#241B0F">确认</text>
+        </g>
+
+        <!-- 说话条 -->
+        <g class="tap" data-toast="也可以直接说「你好小鑫」唤醒">
+          <rect x="8" y="272" width="224" height="40" rx="20" fill="#1E2A33"/>
+          <use href="#i-mic" transform="translate(76,284)" style="color:#A8B9C4"/>
+          <text class="f16" x="100" y="297" style="fill:#C9D6DF">按住说话</text>
+        </g>
+      </g>
+
+      <!-- ============================================================ 8. 设置 -->
+      <g class="screen" id="s-settings" data-name="设置">
+        <rect width="240" height="320" fill="#0B1116"/>
+        <use href="#sb"/>
+        <g class="tap" data-back="1">
+          <rect class="hit" x="2" y="30" width="40" height="30"/>
+          <use href="#i-back" transform="translate(12,37)" style="color:#C9D6DF"/>
+        </g>
+        <text class="f16" x="40" y="50">设置</text>
+
+        <g class="tap" data-toast="静默阈值：10 / 30 / 60 分钟">
+          <text class="f16" x="20" y="84">静默提醒</text>
+          <text class="f12 muted end" x="206" y="84">30 分钟</text>
+          <use href="#i-chev" transform="translate(210,70)" style="color:#8496A2"/>
+        </g>
+        <line x1="20" y1="100.5" x2="232" y2="100.5" stroke="#1A242C"/>
+
+        <g class="tap" data-toast="免打扰时段：夜间不检测静默，仍保留呼救与跌倒">
+          <text class="f16" x="20" y="126">免打扰</text>
+          <text class="f12 muted end" x="206" y="126">22:00–07:00</text>
+          <use href="#i-chev" transform="translate(210,112)" style="color:#8496A2"/>
+        </g>
+        <line x1="20" y1="142.5" x2="232" y2="142.5" stroke="#1A242C"/>
+
+        <g class="tap" data-toast="跌倒灵敏度三档：低 / 中 / 高（由家属在手机端设定）">
+          <text class="f16" x="20" y="168">跌倒灵敏度</text>
+          <text class="f12 muted end" x="206" y="168">中</text>
+          <use href="#i-chev" transform="translate(210,154)" style="color:#8496A2"/>
+        </g>
+        <line x1="20" y1="184.5" x2="232" y2="184.5" stroke="#1A242C"/>
+
+        <g class="tap" data-toast="对讲音量三档，老人模式 ≥ 85 dB">
+          <text class="f16" x="20" y="210">对讲音量</text>
+          <text class="f12 muted end" x="206" y="210">三档</text>
+          <use href="#i-chev" transform="translate(210,196)" style="color:#8496A2"/>
+        </g>
+        <line x1="20" y1="226.5" x2="232" y2="226.5" stroke="#1A242C"/>
+
+        <g class="tap" data-toast="平安报：定时上报云端，4 小时报不上即通知家属">
+          <text class="f16" x="20" y="252">平安报</text>
+          <rect x="196" y="238" width="32" height="18" rx="9" fill="#3DDC97"/>
+          <circle cx="219" cy="247" r="7" fill="#0B1116"/>
+        </g>
+        <line x1="20" y1="268.5" x2="232" y2="268.5" stroke="#1A242C"/>
+
+        <g class="tap" data-toast="设备自检：麦克风 / 喇叭 / 传感器 / 存储">
+          <text class="f16" x="20" y="294">自检与配网</text>
+          <use href="#i-chev" transform="translate(210,280)" style="color:#8496A2"/>
+        </g>
+      </g>
+      </svg>
+      <!-- ===================== SVG 结束 ===================== -->
+    </div>
+
+    <div class="zoom">
+      <button id="btn1x">1×</button>
+      <button id="btn2x" class="on">2×</button>
+    </div>
+  </div>
+
+  <aside class="panel">
+    <section>
+      <h2>跳转</h2>
+      <div class="row" id="screenlist">
+        <button data-goto="home">主屏</button>
+        <button data-goto="talk">对讲</button>
+        <button data-goto="sos">呼救中</button>
+        <button data-goto="alarm">收到告警</button>
+        <button data-goto="events">事件</button>
+        <button data-goto="apps">商店</button>
+        <button data-goto="chat">AI 对话</button>
+        <button data-goto="settings">设置</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>状态</h2>
+      <div class="row">
+        <button data-peer="online" class="on">对端在线</button>
+        <button data-peer="offline">对端离线</button>
+      </div>
+      <p class="note">切到「对端离线」再看对讲页：必须出现「对方不在同一网络」提示，不允许静默失效（FR-4）。</p>
+    </section>
+
+    <section>
+      <h2>工具</h2>
+      <div class="row">
+        <button id="btnOverview">全部屏总览</button>
+        <button id="btnExport">导出当前屏 SVG</button>
+      </div>
+      <p class="note">「导出」得到的是干净的单屏 SVG（含内联样式与图标），可直接贴进设计稿或作为 LVGL 坐标参照。</p>
+    </section>
+
+    <section>
+      <h2>说明</h2>
+      <p class="note" style="margin-top:0">
+        所有点击只做界面跳转与提示，不含业务逻辑。<br>
+        画布 1:1 为 240×320 CSS px，与 LVGL 分辨率一致；坐标全部落在 4 px 网格上。
+      </p>
+    </section>
+  </aside>
+</main>
+
+<section id="overview"><h2>全部界面</h2><div class="sheet" id="sheet"></div></section>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  const svg = document.getElementById('ui');
+  const screens = [...svg.querySelectorAll('.screen')];
+  const ids = screens.map(s => s.id.slice(2));
+  const list = [...document.querySelectorAll('#screenlist [data-goto]')];
+  const toastEl = document.getElementById('toast');
+  let cur = 'home', stack = [], toastTimer = 0;
+
+  function show(id, push){
+    if(!ids.includes(id)) id = 'home';
+    if(push !== false && id !== cur) stack.push(cur);
+    cur = id;
+    screens.forEach(s => s.classList.toggle('on', s.id === 's-' + id));
+    list.forEach(b => b.classList.toggle('on', b.dataset.goto === id));
+    document.title = 'AI 安全监护对讲 · ' + id;
+  }
+  function back(){
+    const prev = stack.length ? stack.pop() : 'home';
+    show(prev, false);
+  }
+  function toast(msg){
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove('show'), 1800);
+  }
+
+  svg.addEventListener('click', e => {
+    const t = e.target.closest('[data-go],[data-back],[data-toast]');
+    if(!t) return;
+    if(t.dataset.go) show(t.dataset.go);
+    else if(t.dataset.back) back();
+    if(t.dataset.toast) toast(t.dataset.toast);
+  });
+
+  list.forEach(b => b.addEventListener('click', () => show(b.dataset.goto)));
+
+  document.querySelectorAll('[data-peer]').forEach(b => b.addEventListener('click', () => {
+    svg.dataset.peer = b.dataset.peer;
+    document.querySelectorAll('[data-peer]').forEach(o => o.classList.toggle('on', o === b));
+  }));
+
+  // 1× / 2× 缩放（只改显示尺寸，不影响 240×320 的坐标系）
+  const b1 = document.getElementById('btn1x'), b2 = document.getElementById('btn2x');
+  function zoom(k){
+    svg.setAttribute('width', 240 * k); svg.setAttribute('height', 320 * k);
+    b1.classList.toggle('on', k === 1); b2.classList.toggle('on', k === 2);
+  }
+  b1.onclick = () => zoom(1);
+  b2.onclick = () => zoom(2);
+
+  // 全部屏总览
+  const sheet = document.getElementById('sheet');
+  const css = svg.querySelector('style').textContent;
+  const defs = svg.querySelector('defs').outerHTML;
+  function renderOverview(){
+    const NS = 'http://www.w3.org/2000/svg';
+    if(!sheet.children.length){
+      screens.forEach(s => {
+        const fig = document.createElement('figure');
+        const clone = document.createElementNS(NS, 'svg');
+        clone.setAttribute('viewBox', '0 0 240 320');
+        clone.setAttribute('width', 240); clone.setAttribute('height', 320);
+        const st = document.createElementNS(NS, 'style'); st.textContent = css;
+        const d = document.createElementNS(NS, 'defs'); d.innerHTML = defs.replace(/^<defs[^>]*>|<\/defs>$/g, '');
+        const g = s.cloneNode(true); g.setAttribute('class', 'screen on');
+        clone.append(st, d, g);
+        const cap = document.createElement('figcaption');
+        cap.textContent = s.dataset.name;
+        fig.append(clone, cap); sheet.append(fig);
+      });
+    }
+    const on = document.getElementById('overview').classList.toggle('on');
+    if(on) document.getElementById('overview').scrollIntoView({behavior:'smooth'});
+  }
+  document.getElementById('btnOverview').onclick = renderOverview;
+
+  // 导出当前屏
+  document.getElementById('btnExport').onclick = () => {
+    const g = svg.querySelector('.screen.on').cloneNode(true);
+    const out = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 320" width="240" height="320">' +
+      '<style>' + css + '</style>' + defs + g.outerHTML + '</svg>';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([out], {type:'image/svg+xml'}));
+    a.download = 'screen-' + cur + '.svg';
+    a.click(); URL.revokeObjectURL(a.href);
+  };
+
+  // 支持 ?screen=talk&peer=offline&bare=1&view=overview
+  const params = new URLSearchParams(location.search);
+  const q = params.get('screen');
+  const peer = params.get('peer');
+  if(peer === 'offline'){
+    svg.dataset.peer = 'offline';
+    document.querySelectorAll('[data-peer]').forEach(o => o.classList.toggle('on', o.dataset.peer === 'offline'));
+  }
+  if(params.get('bare')) document.body.classList.add('bare');
+  show(q || 'home', false);
+  if(params.get('view') === 'overview'){ renderOverview(); zoom(1); }
+})();
+</script>
+</body>
+</html>

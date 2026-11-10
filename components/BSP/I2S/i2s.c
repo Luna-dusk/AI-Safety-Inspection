@@ -27,6 +27,13 @@ typedef struct {
     uint32_t identical;
 } mic_stats_t;
 
+/**
+ * @brief  清零统计结构体，并把最小/最大值初始化为"反向极值"
+ * @param  stats 待复位的统计上下文
+ *
+ * minimum 预置 INT16_MAX、maximum 预置 INT16_MIN，
+ * 保证第一帧数据进来时一定会被替换，否则初值 0 会污染 min/max。
+ */
 static void reset_stats(mic_stats_t *stats)
 {
     memset(stats, 0, sizeof(*stats));
@@ -36,9 +43,18 @@ static void reset_stats(mic_stats_t *stats)
     }
 }
 
-static void add_stats(mic_stats_t *stats, const int32_t slots[2])
+/**
+ * @brief  把一帧麦克风数据累加进统计上下文
+ * @param  stats 统计上下文
+ * @param  frame 一帧原始双麦数据（每声道 32 位，高 16 位有效）
+ *
+ * 逐声道累计：和、平方和、峰值、削顶次数(>=32760)、最小/最大值；
+ * 另外统计左右内积（用于互相关）以及"两声道完全相同"的帧数。
+ * 后者是判断两颗麦是否真的独立工作的关键证据。
+ */
+static void add_stats(mic_stats_t *stats, const mic_frame_t *frame)
 {
-    int32_t pcm[2] = {dual_mic_pcm16(slots[0]), dual_mic_pcm16(slots[1])};
+    const int16_t pcm[2] = {dual_mic_pcm16(frame->left), dual_mic_pcm16(frame->right)};
     ++stats->frames;
     for (int ch = 0; ch < 2; ++ch) {
         int32_t value = pcm[ch];
@@ -54,6 +70,20 @@ static void add_stats(mic_stats_t *stats, const int32_t slots[2])
     if (pcm[0] == pcm[1]) ++stats->identical;
 }
 
+/**
+ * @brief  每秒输出一组双麦电平统计，用于接线与声学排查
+ * @param  stats        统计上下文
+ * @param  mode         当前混音模式（LEFT/RIGHT/AVERAGE/DIFFERENCE）
+ * @param  recording    是否正在录音
+ * @param  boot_level   BOOT 键当前原始电平
+ * @param  boot_pressed 消抖后的按下状态
+ * @param  held_ms      已按住时长（毫秒）
+ * @param  boot_edges   本统计窗口内的按键跳变次数
+ *
+ * 计算均值、方差、RMS、左右互相关，并在两种异常下打 WARN：
+ *   1) 某声道 min==max -> 该时隙恒为常数，检查供电、SD 或 L/R 接法；
+ *   2) 全部帧左右相同   -> 两颗麦未被独立验证，可能是同一路信号复制。
+ */
 static void report_stats(const mic_stats_t *stats, dual_mic_mode_t mode, bool recording,
                          int boot_level, bool boot_pressed, uint32_t held_ms, uint32_t boot_edges)
 {
@@ -90,6 +120,19 @@ static void report_stats(const mic_stats_t *stats, dual_mic_mode_t mode, bool re
     }
 }
 
+/**
+ * @brief  初始化两路 I2S：I2S0 扬声器发送、I2S1 双麦接收
+ *
+ * I2S0（TX，接 MAX98357）：16 kHz / 16 bit / 立体声，同一单声道复制到左右时隙，
+ *   DMA 4x128 帧，开 tx_desc_auto_clear 保证欠载时自动补零而不是循环旧数据。
+ * I2S1（RX，接两颗 INMP441）：16 kHz / 32 bit 时隙（24 位数据左对齐在高位），
+ *   BCLK = 1.024 MHz，DMA 8x128 帧。
+ *
+ * @note 两颗 INMP441 共用 BCLK/WS/SD：左麦 L/R 接地、右麦 L/R 接 3.3V，
+ *       靠 L/R 脚选声道，接反会导致左右声道互换。
+ * @note 本函数只装驱动、不读数据；实际采集在 i2s_loopback_task 或
+ *       （规划中的）音频帧管线里进行，二者争用 I2S1，不能同时跑。
+ */
 void init_i2s(void)
 {
     const i2s_config_t speaker = {
@@ -99,7 +142,7 @@ void init_i2s(void)
         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .dma_buf_count = 4,
-        .dma_buf_len = I2S_BLOCK_FRAMES,
+        .dma_buf_len = SPK_BLOCK_FRAMES,
         .tx_desc_auto_clear = true,
     };
     const i2s_pin_config_t speaker_pins = {
@@ -121,7 +164,7 @@ void init_i2s(void)
         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .dma_buf_count = 8,
-        .dma_buf_len = I2S_BLOCK_FRAMES,
+        .dma_buf_len = MIC_BLOCK_FRAMES,
     };
     const i2s_pin_config_t microphone_pins = {
         .mck_io_num = I2S_PIN_NO_CHANGE,
@@ -132,10 +175,20 @@ void init_i2s(void)
     };
     ESP_ERROR_CHECK(i2s_driver_install(I2S_NUM_1, &microphone, 0, NULL));
     ESP_ERROR_CHECK(i2s_set_pin(I2S_NUM_1, &microphone_pins));
-    ESP_LOGI(TAG, "RX: 16000 Hz, stereo 32-bit slots, BCLK=1024000 Hz; BCLK=%d WS=%d SD=%d",
-             I2S_MIC_BCK_PIN, I2S_MIC_WS_PIN, I2S_MIC_DATAIN_PIN);
+    ESP_LOGI(TAG, "RX: %d Hz, stereo 32-bit slots, BCLK=%d Hz; BCLK=%d WS=%d SD=%d, %u bytes/frame",
+             I2S_SAMPLE_RATE, I2S_SAMPLE_RATE * 32 * 2,
+             I2S_MIC_BCK_PIN, I2S_MIC_WS_PIN, I2S_MIC_DATAIN_PIN,
+             (unsigned)sizeof(mic_frame_t));
 }
 
+/**
+ * @brief  把 BOOT 键(GPIO0)配置为上拉输入
+ *
+ * 只在本模块的自测 demo 中使用；正式的按键管理见 KEY/key.c。
+ *
+ * @note 该引脚在 i2s.h 里叫 BTN_BOOT_PIN、在 key.h 里叫 BOOT_GPIO_PIN，
+ *       同一个 GPIO0 被两处重复定义并各自初始化，改接线时要同步改两处。
+ */
 void boot_init(void)
 {
     const gpio_config_t button = {
@@ -148,12 +201,136 @@ void boot_init(void)
     ESP_ERROR_CHECK(gpio_config(&button));
 }
 
-static esp_err_t write_speaker(const int16_t *samples, size_t bytes)
+/* ══════════ 音频帧管线：运行时音量 + 双麦接收 ══════════ */
+
+/** 当前扬声器音量，0.0 ~ 1.0；初值取编译期默认 SPK_VOLUME */
+static float s_spk_volume = SPK_VOLUME;
+/** 双麦 DC 跟踪状态，跨调用保持 */
+static dual_mic_filter_t s_mic_filter;
+/** 自适应开关（当前没有 LMS 核，仅记录状态） */
+static volatile bool s_mic_adapt = true;
+/** receive_audio() 的整帧读取暂存区 */
+static mic_frame_t s_mic_scratch[MIC_BLOCK_FRAMES];
+
+/**
+ * @brief  设置扬声器音量
+ * @param  vol 目标音量，0.0 ~ 1.0，越界会被夹到边界
+ *
+ * 只改一个静态变量，不碰 DMA 或驱动；下一次 write_speaker() 生效。
+ */
+void i2s_spk_set_volume(float vol)
 {
+    if (vol < 0.0f) vol = 0.0f;
+    if (vol > 1.0f) vol = 1.0f;
+    s_spk_volume = vol;
+    ESP_LOGI(TAG, "speaker volume = %.2f", (double)s_spk_volume);
+}
+
+/**
+ * @brief  读取当前扬声器音量
+ * @return 0.0 ~ 1.0
+ */
+float i2s_spk_get_volume(void)
+{
+    return s_spk_volume;
+}
+
+/**
+ * @brief  清空双麦 DC 估计
+ *
+ * 只重置滤波器状态，不改混音模式，也不动 I2S 驱动。
+ */
+void i2s_dual_mic_reset(void)
+{
+    memset(&s_mic_filter, 0, sizeof(s_mic_filter));
+    ESP_LOGI(TAG, "dual-mic DC estimate reset");
+}
+
+/**
+ * @brief  允许/禁止双麦自适应降噪
+ * @param  on true = 允许，false = 冻结
+ *
+ * 当前实现只记录状态：本工程没有 LMS 自适应核（源工程里该核默认也是
+ * I2S_NS_MU_Q16=0 的纯平均模式）。保留接口是为了让 AFE 的调用点不用改。
+ */
+void i2s_dual_mic_set_adapt(bool on)
+{
+    if (s_mic_adapt != on) {
+        ESP_LOGI(TAG, "dual-mic adapt %s (no LMS core, flag only)", on ? "ON" : "OFF");
+    }
+    s_mic_adapt = on;
+}
+
+/**
+ * @brief  从 I2S1 读取双麦数据，合成单声道 PCM16
+ * @param  buf           输出缓冲区（int16_t 采样）
+ * @param  len           buf 的字节长度，必须是 sizeof(int16_t) 的整数倍
+ * @param  bytes_read    实际写入的字节数（可为 NULL）
+ * @param  ticks_to_wait 每块读取的等待上限
+ * @return ESP_OK 成功（可能是部分读取）；ESP_ERR_INVALID_ARG 参数非法；其它为驱动错误
+ *
+ * 按 mic_frame_t 整帧读取，每帧经 dual_mic_process() 混成单声道并做 DC 跟踪；
+ * 混音模式取 I2S_INITIAL_MODE（当前=只取左麦，与源工程单麦行为一致）。
+ *
+ * @note 循环补齐：一次 i2s_read 可能只够一部分，凑满 want 个采样才返回。
+ * @note 超时或短读时返回已拿到的部分，此时 bytes_read < len 是正常情况，
+ *       调用方要按 bytes_read 而不是 len 处理。
+ * @note 与 i2s_loopback_task 争用 I2S1，两者不能同时运行。
+ */
+esp_err_t receive_audio(int16_t *buf, size_t len, size_t *bytes_read, TickType_t ticks_to_wait)
+{
+    if (buf == NULL || len == 0 || (len % sizeof(int16_t)) != 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (bytes_read != NULL) *bytes_read = 0;
+
+    const size_t want = len / sizeof(int16_t);   /* 需要的采样点数 */
+    size_t got = 0;
+
+    while (got < want) {
+        size_t chunk = want - got;
+        if (chunk > MIC_BLOCK_FRAMES) chunk = MIC_BLOCK_FRAMES;
+
+        size_t received = 0;
+        esp_err_t err = i2s_read(I2S_NUM_1, (uint8_t *)s_mic_scratch,
+                                 chunk * sizeof(mic_frame_t),
+                                 &received, ticks_to_wait);
+        if (err != ESP_OK) return err;
+
+        size_t frames = received / sizeof(mic_frame_t);
+        if (frames == 0) break;              /* 超时：把已拿到的交出去 */
+
+        for (size_t i = 0; i < frames; ++i) {
+            buf[got + i] = dual_mic_process(&s_mic_filter,
+                                            s_mic_scratch[i].left,
+                                            s_mic_scratch[i].right,
+                                            I2S_INITIAL_MODE);
+        }
+        got += frames;
+        if (frames < chunk) break;           /* 短读：不再等，直接返回 */
+    }
+
+    if (bytes_read != NULL) *bytes_read = got * sizeof(int16_t);
+    return ESP_OK;
+}
+
+/**
+ * @brief  向 I2S0 写出指定帧数，处理短写
+ * @param  frames 待输出的 PCM16 双声道帧数组
+ * @param  count  帧数（不是字节数）
+ * @return ESP_OK 全部写完；其它为驱动返回的错误；写不动时返回 ESP_ERR_TIMEOUT
+ *
+ * 对外只认"帧数"，字节换算是本函数内部的事，调用方不再需要 sizeof 运算。
+ * i2s_write 可能只写出一部分，所以用循环补齐，单次等待上限 100 ms。
+ */
+static esp_err_t write_speaker(const pcm16_frame_t *frames, size_t count)
+{
+    const uint8_t *base = (const uint8_t *)frames;
+    const size_t bytes = count * sizeof(pcm16_frame_t);
     size_t total = 0;
     while (total < bytes) {
         size_t written = 0;
-        esp_err_t err = i2s_write(I2S_NUM_0, (const uint8_t *)samples + total,
+        esp_err_t err = i2s_write(I2S_NUM_0, base + total,
                                   bytes - total, &written, pdMS_TO_TICKS(100));
         if (err != ESP_OK) return err;
         if (written == 0) return ESP_ERR_TIMEOUT;
@@ -162,44 +339,106 @@ static esp_err_t write_speaker(const int16_t *samples, size_t bytes)
     return ESP_OK;
 }
 
-/* This function reads only saved PCM. Live microphone data cannot reach TX
- * during replay, breaking the speaker -> microphone -> speaker feedback path. */
-static esp_err_t replay_recording(const int16_t *saved, size_t frames, int16_t *tx,
+esp_err_t i2s_spk_write(const int16_t *mono, size_t samples)
+{
+    pcm16_frame_t tx[SPK_BLOCK_FRAMES];      /* 512 B 栈缓冲：避免引入跨任务共享的静态 */
+    size_t done = 0;
+    while (done < samples) {
+        size_t n = samples - done;
+        if (n > SPK_BLOCK_FRAMES) n = SPK_BLOCK_FRAMES;
+        for (size_t i = 0; i < n; ++i) {     /* 音量 + 单转双，与 replay_recording 一致 */
+            int16_t out = (int16_t)(mono[done + i] * s_spk_volume);
+            tx[i].left = out;
+            tx[i].right = out;
+        }
+        esp_err_t err = write_speaker(tx, n);
+        if (err != ESP_OK) return err;       /* 阻塞写 = 免费流控，出错的语义交给上层 */
+        done += n;
+    }
+    return ESP_OK;
+}
+
+esp_err_t i2s_spk_write_silence(int blocks)
+{
+    if (blocks <= 0) blocks = 6;             /* 与 replay_recording 的收尾块数一致 */
+    pcm16_frame_t tx[SPK_BLOCK_FRAMES];
+    memset(tx, 0, sizeof(tx));
+    for (int block = 0; block < blocks; ++block) {
+        esp_err_t err = write_speaker(tx, SPK_BLOCK_FRAMES);
+        if (err != ESP_OK) return err;
+    }
+    return ESP_OK;
+}
+
+/**
+ * @brief  回放已录制的单声道 PCM，并保证回放期间麦克风数据不会进入功放
+ * @param  saved  已录制的单声道 PCM 采样
+ * @param  frames 帧数
+ * @param  tx     输出暂存区（双声道，每帧两个相同采样）
+ * @param  mode   录音时使用的混音模式（仅用于日志）
+ * @return ESP_OK 成功
+ *
+ * 关键设计：回放数据只来自 saved 缓冲区，绝不读取实时麦克风，
+ * 从数据通路上直接断掉"喇叭->麦克风->喇叭"的自激回路（本项目没有 AEC）。
+ * 每段数据做 20 ms 淡入淡出（I2S_SAMPLE_RATE/50 帧）避免首尾爆音；
+ * 结尾额外写 6 个静音块，把 4 个 TX DMA 缓冲里的残留音推出去再清空，
+ * 否则回放尾巴会被截断。
+ */
+static esp_err_t replay_recording(const int16_t *saved, size_t frames, pcm16_frame_t *tx,
                                    dual_mic_mode_t mode)
 {
     ESP_LOGI(TAG, "replay START mode=%s record=0 play=1 duration_ms=%u volume=%.2f",
-             mode_names[mode], (unsigned)(frames * 1000 / I2S_SAMPLE_RATE), (double)SPK_VOLUME);
-    for (size_t offset = 0; offset < frames; offset += I2S_BLOCK_FRAMES) {
+             mode_names[mode], (unsigned)(frames * 1000 / I2S_SAMPLE_RATE), (double)s_spk_volume);
+    for (size_t offset = 0; offset < frames; offset += SPK_BLOCK_FRAMES)
+    {
         size_t block_frames = frames - offset;
-        if (block_frames > I2S_BLOCK_FRAMES) block_frames = I2S_BLOCK_FRAMES;
-        for (size_t i = 0; i < block_frames; ++i) {
+        if (block_frames > SPK_BLOCK_FRAMES) block_frames = SPK_BLOCK_FRAMES;
+        for (size_t i = 0; i < block_frames; ++i)
+        {
             int16_t faded = dual_mic_replay_sample(saved[offset + i], (uint32_t)(offset + i),
                                                   (uint32_t)frames, I2S_SAMPLE_RATE / 50);
-            int16_t output = (int16_t)(faded * SPK_VOLUME);
-            tx[i * 2] = output;
-            tx[i * 2 + 1] = output;
+            int16_t output = (int16_t)(faded * s_spk_volume);
+            tx[i].left = output;
+            tx[i].right = output;
         }
-        esp_err_t err = write_speaker(tx, block_frames * 2 * sizeof(int16_t));
+        esp_err_t err = write_speaker(tx, block_frames);
         if (err != ESP_OK) return err;
     }
-    // Queue enough silence for the saved audio to leave the four TX DMA buffers
-    // before clearing them; otherwise the tail could be truncated.
-    memset(tx, 0, I2S_BLOCK_FRAMES * 2 * sizeof(int16_t));
+    /* 写够静音，把已录声音推出 4 个 TX DMA 缓冲后再清空，否则尾巴会被截断。 */
+    memset(tx, 0, sizeof(pcm16_frame_t) * SPK_BLOCK_FRAMES);
     for (int block = 0; block < 6; ++block) {
-        esp_err_t err = write_speaker(tx, I2S_BLOCK_FRAMES * 2 * sizeof(int16_t));
+        esp_err_t err = write_speaker(tx, SPK_BLOCK_FRAMES);
         if (err != ESP_OK) return err;
     }
     ESP_LOGI(TAG, "replay END record=0 play=0; ready for next recording");
     return ESP_OK;
 }
 
+/**
+ * @brief  双麦录放自测任务
+ * @param  arg 未使用
+ *
+ * 按键语义：
+ *   - 短按 BOOT(<400 ms) 松开 -> 循环切换混音模式 LEFT->RIGHT->AVERAGE->DIFFERENCE；
+ *   - 按住 BOOT(>=400 ms)    -> 开始录音（最多 3 秒），松开后自动回放。
+ *
+ * 内部要点：
+ *   - RX 按"帧"累积：filled_frames 记已收帧数，凑满 I2S_BLOCK_FRAMES 帧才处理；
+ *   - 上电先丢弃 64 个块（约 512 ms）等麦克风稳定；
+ *   - 回放结束后丢弃 RX 积压的 8 个块，再等 16 个块（约 128 ms）
+ *     让喇叭余振衰减，然后才恢复录音，避免把回放尾巴录进去；
+ *   - 实时采集阶段 TX 恒为 0，只有 replay_recording() 里才输出声音。
+ *
+ * @note saved[] 是 96000 字节静态缓冲（3 秒 x 16 kHz x 2 字节），常驻内部 RAM。
+ * @note 本任务与 AFE 音频管线互斥：都从 I2S_NUM_1 读数据，不能并存。
+ */
 void i2s_loopback_task(void *arg)
 {
     (void)arg;
-    // Static buffers keep the app_main stack small. I2S DMA remains driver-owned.
-    static int32_t rx[I2S_BLOCK_FRAMES * 2];
-    static int16_t tx[I2S_BLOCK_FRAMES * 2];
-    static int16_t saved[I2S_SAMPLE_RATE * I2S_RECORD_SECONDS];
+    /* 静态缓冲，避免占用 app_main 栈。I2S DMA 缓冲仍归驱动所有。 */
+    static mic_frame_t   rx[MIC_BLOCK_FRAMES];
+    static pcm16_frame_t tx[SPK_BLOCK_FRAMES];
+    static int16_t       saved[I2S_SAMPLE_RATE * I2S_RECORD_SECONDS];
     dual_mic_filter_t filter = {0};
     mic_stats_t stats;
     reset_stats(&stats);
@@ -214,21 +453,25 @@ void i2s_loopback_task(void *arg)
     TickType_t changed_at = xTaskGetTickCount();
     TickType_t pressed_at = changed_at;
     TickType_t last_data_at = changed_at;
-    size_t filled = 0;
-    unsigned warmup_blocks = 64; // 512 ms at 16 kHz, exceeding microphone startup time.
+    size_t filled_frames = 0;
+    unsigned warmup_blocks = 64; /* 16 kHz 下 512 ms，超过麦克风启动时间 */
 
     ESP_LOGI(TAG, "Short BOOT press: LEFT -> RIGHT -> AVERAGE -> DIFFERENCE");
     ESP_LOGI(TAG, "Hold BOOT >=400 ms: RECORD (max %d s); release: REPLAY. Initial mode=%s",
              I2S_RECORD_SECONDS,
              mode_names[mode]);
     ESP_LOGI(TAG, "Keep the speaker away from microphones during loopback checks");
-    ESP_LOGI(TAG, "Record/replay output volume=%.2f; no live microphone loopback", (double)SPK_VOLUME);
+    ESP_LOGI(TAG, "Record/replay output volume=%.2f; no live microphone loopback", (double)s_spk_volume);
+    ESP_LOGI(TAG, "Block = %u frames = %u B (mic) / %u B (spk)",
+             (unsigned)MIC_BLOCK_FRAMES, (unsigned)MIC_BLOCK_BYTES, (unsigned)SPK_BLOCK_BYTES);
     ESP_LOGI(TAG, "BOOT GPIO%d: initial level=%d, pressed=LOW, debounce=30 ms, hold=400 ms",
              BTN_BOOT_PIN, gpio_get_level(BTN_BOOT_PIN));
     while (true) {
-        size_t received = 0;
-        esp_err_t err = i2s_read(I2S_NUM_1, (uint8_t *)rx + filled, sizeof(rx) - filled,
-                                 &received, pdMS_TO_TICKS(100));
+        size_t received_bytes = 0;
+        esp_err_t err = i2s_read(I2S_NUM_1,
+                                 (uint8_t *)&rx[filled_frames],
+                                 (MIC_BLOCK_FRAMES - filled_frames) * sizeof(mic_frame_t),
+                                 &received_bytes, pdMS_TO_TICKS(100));
         TickType_t now = xTaskGetTickCount();
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "microphone read failed: %s", esp_err_to_name(err));
@@ -236,9 +479,16 @@ void i2s_loopback_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
-        filled += received;
-        if (received > 0) last_data_at = now;
-        if (filled < sizeof(rx)) {
+        if (received_bytes % sizeof(mic_frame_t) != 0) {
+            /* 理论上不会发生：驱动按帧对齐返回。真发生了就丢掉残块重新攒。 */
+            ESP_LOGW(TAG, "RX returned %u bytes, not a whole number of frames; restarting block",
+                     (unsigned)received_bytes);
+            filled_frames = 0;
+            continue;
+        }
+        if (received_bytes > 0) last_data_at = now;
+        filled_frames += received_bytes / sizeof(mic_frame_t);
+        if (filled_frames < MIC_BLOCK_FRAMES) {
             if ((now - last_data_at) >= pdMS_TO_TICKS(1000)) {
                 ESP_LOGW(TAG, "no microphone data for 1 second; check I2S clocks");
                 last_data_at = now;
@@ -247,7 +497,7 @@ void i2s_loopback_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
-        filled = 0;
+        filled_frames = 0;
         if (warmup_blocks > 0) {
             --warmup_blocks;
             continue;
@@ -274,7 +524,7 @@ void i2s_loopback_task(void *arg)
             }
         }
         bool recording_gate = pressed && stable_pressed && (now - pressed_at) >= pdMS_TO_TICKS(400);
-        // Recording state consumes the debounced button, replay waits for release.
+        /* 录音状态先吃掉消抖后的按键；回放要等松手才触发。 */
         if (recording_gate && !recording_session) {
             recording_session = true;
             recording_full = false;
@@ -290,33 +540,31 @@ void i2s_loopback_task(void *arg)
             recorded_frames = 0;
             filter = (dual_mic_filter_t){0};
             reset_stats(&stats);
-            // RX continued while saved audio played. Drain its eight queued
-            // blocks, then leave another 128 ms for speaker decay before capture.
+            /* 回放期间 RX 仍在积压：先排空 8 个块，再留 128 ms 让喇叭余振衰减。 */
             for (int block = 0; block < 8; ++block) {
                 size_t discarded = 0;
-                ESP_ERROR_CHECK(i2s_read(I2S_NUM_1, rx, sizeof(rx), &discarded, 0));
+                ESP_ERROR_CHECK(i2s_read(I2S_NUM_1, (uint8_t *)rx, sizeof(rx), &discarded, 0));
             }
             warmup_blocks = 16;
             continue;
         }
-        for (size_t frame = 0; frame < I2S_BLOCK_FRAMES; ++frame) {
-            const int32_t *pair = &rx[frame * 2];
-            add_stats(&stats, pair);
-            int16_t mono = dual_mic_process(&filter, pair, mode);
+        for (size_t i = 0; i < MIC_BLOCK_FRAMES; ++i) {
+            const mic_frame_t *frame = &rx[i];
+            add_stats(&stats, frame);
+            int16_t mono = dual_mic_process(&filter, frame->left, frame->right, mode);
             if (recording_session && recorded_frames < I2S_SAMPLE_RATE * I2S_RECORD_SECONDS) {
                 saved[recorded_frames++] = mono;
             }
-            // Always silent during live capture. TX receives saved audio only
-            // inside replay_recording(), after the recording has stopped.
-            tx[frame * 2] = 0;
-            tx[frame * 2 + 1] = 0;
+            /* 实时采集阶段恒静音；只有 replay_recording() 里才往 TX 写声音。 */
+            tx[i].left = 0;
+            tx[i].right = 0;
         }
         if (recording_session && !recording_full && recorded_frames == I2S_SAMPLE_RATE * I2S_RECORD_SECONDS) {
             recording_full = true;
             ESP_LOGI(TAG, "record buffer FULL (%d s), record=0 play=0; release BOOT to replay",
                      I2S_RECORD_SECONDS);
         }
-        err = write_speaker(tx, sizeof(tx));
+        err = write_speaker(tx, SPK_BLOCK_FRAMES);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "speaker write failed: %s", esp_err_to_name(err));
             ESP_ERROR_CHECK(i2s_zero_dma_buffer(I2S_NUM_0));

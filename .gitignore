@@ -6,9 +6,13 @@ sdkconfig.ci
 managed_components/
 
 # ---- 本地私有配置 / 密钥 ----
+HANDOFF.md
+components/HTTP_RS/my_client.h
+AI安全监护对讲-项目需求说明.md
+components/BSP/AI_CHAT/README.md
+components/BSP/AI_CHAT/my_client.h
 .env
 .env.*
-components/BSP/WIFI/wifi_credentials.h
 *.pem
 *.key
 *.p12
@@ -25,6 +29,12 @@ components/BSP/WIFI/wifi_credentials.h
 *.map
 *.hex
 *.uf2
+
+# ---- 工具/会话产物 ----
+.zcode/
+.oil-ui/
+__pycache__/
+*.pyc
 
 # ---- 系统 ----
 .DS_Store

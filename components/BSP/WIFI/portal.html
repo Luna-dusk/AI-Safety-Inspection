@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>ESP热点连接服务</title>
+<style>
+body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#f2f4f7;margin:0;padding:16px;color:#222}
+h2{font-size:18px;margin:8px 0 12px}
+.card{background:#fff;border-radius:12px;padding:14px;margin-bottom:14px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+label{display:block;font-size:13px;color:#666;margin:10px 0 4px}
+input{width:100%;box-sizing:border-box;font-size:16px;padding:10px;border:1px solid #ccc;border-radius:8px}
+button{width:100%;font-size:16px;padding:12px;margin-top:14px;border:0;border-radius:8px;background:#1a73e8;color:#fff}
+.ap{display:flex;justify-content:space-between;padding:11px 8px;border-bottom:1px solid #eee;cursor:pointer;font-size:15px}
+.ap:active{background:#eef3ff}
+.pwd-box{position:relative}
+.eye{position:absolute;right:10px;top:50%;transform:translateY(-50%);font-size:18px;line-height:1;cursor:pointer;user-select:none;padding:6px}
+#tip{font-size:13px;color:#888;margin:6px 0}
+#msg{font-size:14px;margin-top:10px;min-height:20px}
+.ok{color:#188038}.err{color:#d93025}
+</style>
+</head>
+<body>
+<h2>AI 安全巡检设备配网</h2>
+<div class="card">
+  <div id="tip">正在扫描周边 WiFi…</div>
+  <div id="aplist"></div>
+  <a href="javascript:scan()" id="rescan" style="display:none;font-size:13px">重新扫描</a>
+</div>
+<div class="card">
+  <label>WiFi 名称 (SSID)</label>
+  <input id="ssid" maxlength="32" placeholder="点选上方网络或手动输入">
+  <label>WiFi 密码（开放网络可留空）</label>
+  <div class="pwd-box">
+    <input id="pass" type="password" maxlength="64" style="padding-right:44px">
+    <span class="eye" id="eye" onclick="togglePwd()">👁</span>
+  </div>
+  <button onclick="save()">保存并连接</button>
+  <div id="msg"></div>
+</div>
+<script>
+var msg=document.getElementById('msg'),tip=document.getElementById('tip');
+function setMsg(t,c){msg.textContent=t;msg.className=c||''}
+async function scan(){
+  tip.textContent='正在扫描周边 WiFi…';
+  try{
+    var r=await fetch('/scan');var l=await r.json();
+    var box=document.getElementById('aplist');box.textContent='';
+    l.forEach(function(ap){
+      var d=document.createElement('div');d.className='ap';
+      var n=document.createElement('span');n.textContent=ap.s||'(隐藏网络)';
+      var m=document.createElement('span');m.textContent=ap.r+'dBm'+(ap.l?' 🔒':'');
+      d.appendChild(n);d.appendChild(m);
+      d.onclick=function(){document.getElementById('ssid').value=ap.s||''};
+      box.appendChild(d);
+    });
+    tip.textContent=l.length?('共扫描到 '+l.length+' 个网络'):'未扫描到网络';
+    document.getElementById('rescan').style.display='inline';
+  }catch(e){tip.textContent='扫描失败，请点击重新扫描'}
+}
+async function poll(){
+  for(var i=0;i<60;i++){
+    try{
+      var r=await fetch('/status');var s=(await r.json()).s;
+      if(s=='ok'){setMsg('连接成功！设备已联网，热点即将关闭','ok');return}
+      if(s=='err'){setMsg('连接失败：密码错误或信号不佳，请重试','err');return}
+    }catch(e){}
+    await new Promise(function(rs){setTimeout(rs,1000)});
+  }
+  setMsg('连接超时，请重试','err');
+}
+async function save(){
+  var s=document.getElementById('ssid').value.trim();
+  var p=document.getElementById('pass').value;
+  if(!s){setMsg('请填写 WiFi 名称','err');return}
+  if(p&&p.length<8){setMsg('密码长度至少 8 位（开放网络请留空）','err');return}
+  setMsg('正在保存…');
+  try{
+    var b=new URLSearchParams();b.append('ssid',s);b.append('pass',p);
+    var r=await fetch('/save',{method:'POST',body:b});
+    if(!r.ok){setMsg(await r.text(),'err');return}
+    setMsg('正在连接 WiFi，请稍候…');
+    poll();
+  }catch(e){setMsg('提交失败，请重试','err')}
+}
+function togglePwd(){
+  var p=document.getElementById('pass'),e=document.getElementById('eye');
+  if(p.type=='password'){p.type='text';e.textContent='🙈'}
+  else{p.type='password';e.textContent='👁'}
+}
+scan();
+</script>
+</body>
+</html>

@@ -17,6 +17,9 @@ enum LED_GPIO_State
 //反转LED状态
 #define LED_TOGGLE() do {gpio_set_level(LED_GPIO_PIN, !gpio_get_level(LED_GPIO_PIN));} while(0)
 //LED初始化函数
+/**
+ * @brief  初始化状态指示灯(GPIO1)为输入输出模式，默认熄灭
+ */
 void LED_Init(void);
 
 #endif

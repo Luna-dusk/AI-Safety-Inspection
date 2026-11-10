@@ -56,13 +56,13 @@ static inline int16_t dual_mic_mix(int32_t left, int32_t right, dual_mic_mode_t 
 }
 
 /* Q16 DC tracking avoids integer-rounding dead zones. No adaptive noise
- * cancellation: preserve both microphones for independent hardware checks. */
+ * cancellation: preserve both microphones for independent hardware checks.
+ * left/right are the two 32-bit I2S slots of one frame, passed by value. */
 static inline int16_t dual_mic_process(dual_mic_filter_t *filter,
-                                     const int32_t slots[2], dual_mic_mode_t mode)
+                                     int32_t left, int32_t right, dual_mic_mode_t mode)
 {
-    int32_t pcm[2];
+    int32_t pcm[2] = {dual_mic_pcm16(left), dual_mic_pcm16(right)};
     for (int ch = 0; ch < 2; ++ch) {
-        pcm[ch] = dual_mic_pcm16(slots[ch]);
         filter->dc_q16[ch] += ((int64_t)pcm[ch] * 65536 - filter->dc_q16[ch]) / 256;
         pcm[ch] -= (int32_t)(filter->dc_q16[ch] / 65536);
     }
