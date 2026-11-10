@@ -278,7 +278,7 @@ esp_err_t wifi_sta_apply_credentials(const char *ssid, const char *pass)
 
 /* ============================ 联网连通性诊断 ============================ */
 
-#define DIAG_SERVER_IP "81.71.24.233"   /* 与 AI_CHAT/my_client.h 的 SERVER_BASE 保持一致 */
+#define DIAG_SERVER_IP ""   /* 与 AI_CHAT/my_client.h 的 SERVER_BASE 保持一致 */
 
 /**
  * @brief  非阻塞 TCP 探测：区分"秒拒(路由通/端口关)"与"超时(包被丢弃)"
