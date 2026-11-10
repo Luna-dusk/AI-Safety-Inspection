@@ -17,3 +17,4 @@ dependencies:
   espressif/openai: ^1.1.0
   espressif/mdns: ^1.11.1
   espressif/esp-sr: "2.4.6"
+  espressif/esp_websocket_client: "^1.0.0"

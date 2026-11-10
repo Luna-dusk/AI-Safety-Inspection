@@ -13,6 +13,7 @@ components/BSP/AI_CHAT/README.md
 components/BSP/AI_CHAT/my_client.h
 .env
 .env.*
+!.env.example
 *.pem
 *.key
 *.p12

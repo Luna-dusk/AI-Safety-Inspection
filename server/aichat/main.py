@@ -5,7 +5,7 @@ import os
 import aiohttp
 from aiohttp import web
 
-from . import pipeline
+from . import pipeline, ws
 from .config import Config
 from .llm_deepseek import DeepSeekLLM
 from .session_store import SessionStore
@@ -62,6 +62,7 @@ def make_app(cfg: Config = None) -> web.Application:
     app.router.add_post("/api/v1/chat", chat_handler)
     app.router.add_delete("/api/v1/chat/{session_id}", delete_handler)
     app.router.add_get("/healthz", health_handler)
+    app.router.add_get("/ws/v1", ws.ws_handler)   # v2 长连接（附录 B）；v1 HTTP 保留为降级路径
     return app
 
 

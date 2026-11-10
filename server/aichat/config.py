@@ -66,6 +66,12 @@ class Config:
         self.tts_idle_close_ms = int(env.get("TTS_IDLE_CLOSE_MS", "60000"))
         self.session_ttl_ms = int(env.get("SESSION_TTL_MS", "900000"))
 
+        # v2 WebSocket（附录 B）
+        self.ws_heartbeat_s = int(env.get("WS_HEARTBEAT_S", "30"))       # 协议级 ping 周期
+        self.ws_hello_timeout_s = int(env.get("WS_HELLO_TIMEOUT_S", "10"))  # 建连后等 hello
+        self.ws_turn_idle_s = float(env.get("WS_TURN_IDLE_MS", "10000")) / 1000  # 轮内看门狗
+        self.ws_max_audio_bytes = int(env.get("WS_MAX_AUDIO_BYTES", str(480 * 1024)))  # 15s
+
     def tts_ready(self) -> bool:
         return bool(self.tts_api_key or (self.tts_app_id and self.tts_access_token))
 

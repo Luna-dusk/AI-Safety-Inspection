@@ -2,7 +2,13 @@
 #define TRANSPORT_H
 
 /*
- * Transport：HTTP chunked 传输层（设备 ↔ 服务器唯一网络 IO 层，附录 A.3）。
+ * Transport：设备 ↔ 服务器唯一网络 IO 层。
+ *
+ * v1（附录 A.3）：HTTP chunked 轮次制。
+ * v2（附录 B，2026-11-10）：WebSocket 长连接优先，失败自动降级 v1 HTTP——
+ *   对 CHAT 层完全透明：四个入口（session_start/tx_write/tx_read_loop/tx_end）
+ *   签名与语义不变，内部按本轮实际模式分派。WS 模式下会话按 device_id 键入
+ *   服务器（断线重连恢复上下文），session_delete 变为空操作（服务端 TTL 兜底）。
  *
  * 三个已核实的 IDF 5.4 源码事实（README 4.1，别再凭直觉写）：
  *   esp_http_client_write()         裸写，不做 chunk 分帧（esp_http_client.c:1664）
@@ -52,6 +58,14 @@ void tx_end(void);
 
 /** @brief 异步请求中断：置标志，tx_read_loop/tx_write 在检查点自行退出，连接由 tx_end 收 */
 void tx_abort(void);
+
+/**
+ * @brief  通知传输层"本轮已终结"（收到 done/err/aborted 事件时由 CHAT 层调用）
+ * @note   v2 WS 模式的读循环以此退出（长连接没有 v1 的"流自然结束"信号）；
+ *         v1 HTTP 模式下是空操作（靠响应流 EOF 退出）。漏调的后果是 WS 读循环
+ *         悬挂到首帧超时——所以 handle_json 的 done/err 分支必须调它。
+ */
+void tx_turn_finished(void);
 
 /**
  * @brief  删除服务器侧会话（A.3.3：5 分钟空闲后让服务器停止计费，A.4.4 坑 4）

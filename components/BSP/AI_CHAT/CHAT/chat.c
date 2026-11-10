@@ -162,6 +162,12 @@ static void handle_json(const char *str, uint16_t len, chat_ctx_t *c)
         if (s_event_cb) s_event_cb(AI_CHAT_EVT_ACTION, str, s_event_cb_ctx);
     } else if (strcmp(t, "done") == 0) {
         c->result = CHAT_DONE;      /* 之后继续读完尾巴音频，不提前断流（坑 6） */
+        tx_turn_finished();         /* v2 WS：读循环的退出信号（HTTP 模式空操作） */
+    } else if (strcmp(t, "aborted") == 0) {
+        /* v2 预留（附录 B）：服务器对 abort 的确认。设备侧未启用打断，
+         * 收到只可能是异常路径——按正常收尾处理，不播兜底 */
+        c->result = CHAT_DONE;
+        tx_turn_finished();
     } else if (strcmp(t, "err") == 0) {
         cJSON *code = cJSON_GetObjectItem(root, "code");
         cJSON *msg  = cJSON_GetObjectItem(root, "msg");
@@ -170,6 +176,7 @@ static void handle_json(const char *str, uint16_t len, chat_ctx_t *c)
                  cJSON_IsNumber(code) ? (int)code->valuedouble : -1,
                  msg_str ? msg_str : "?");
         c->result = CHAT_ERR;
+        tx_turn_finished();         /* v2 WS：err 也是轮次终结事件 */
         if (s_event_cb) s_event_cb(AI_CHAT_EVT_ERR, msg_str, s_event_cb_ctx);
     }
     cJSON_Delete(root);                              /* 所有路径都销毁，防泄漏 */

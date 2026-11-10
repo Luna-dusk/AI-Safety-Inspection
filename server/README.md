@@ -1,30 +1,32 @@
 # AI 安全监护对讲 · 服务端（附录 A 方案 B 的编排层）
 
-> 部署目标：`81.71.24.233`。设备侧固件见 `components/BSP/AI_CHAT/README.md`。
+> 部署目标：`<SERVER_IP>`。设备侧固件见 `components/BSP/AI_CHAT/README.md`。
 > 职责：只做"编排"——流式 ASR → LLM → TTS，把设备的一句 PCM 换成一段回复语音。
 > 换 ASR / LLM / TTS 供应商不需要动设备固件（FR-6 同一哲学）。
 
 ```
 ESP32-S3 设备                          本服务                        外部服务
-┌──────────────┐  chunked PCM 上行   ┌──────────────┐  WSS 大模型流式 ASR  ──► 火山
-│  chunked     │ ──────────────────► │  pipeline    │  SSE 流式            ──► deepseek
-│  HTTP POST   │ ◄────────────────── │  (asyncio)   │  WSS 双向流式 TTS    ──► 火山
+┌──────────────┐  v1: chunked PCM 上行 ┌──────────────┐  WSS 大模型流式 ASR  ──► 火山
+│  v1 HTTP POST│ ──────────────────► │  pipeline    │  SSE 流式            ──► deepseek
+│  v2 WS 长连接 │ ◄────────────────── │  run_turn    │  WSS 双向流式 TTS    ──► 火山
 └──────────────┘  帧流下行(0x01/0x02) └──────────────┘
+                    （v1/v2 共用同一份轮次编排，见下 v2 章节）
 ```
 
 ## 目录
 
 | 文件 | 职责 |
 | --- | --- |
-| `aichat/main.py` | aiohttp 入口：POST /api/v1/chat、DELETE /api/v1/chat/{sid}、GET /healthz |
-| `aichat/pipeline.py` | 一轮对话的编排（本文档核心）：预热、并行泵、打点、错误兜底 |
+| `aichat/main.py` | aiohttp 入口：POST /api/v1/chat、DELETE /api/v1/chat/{sid}、GET /healthz、GET /ws/v1 |
+| `aichat/pipeline.py` | 一轮对话的编排 `run_turn`（本文档核心）：传输无关，HTTP/WS 共用；预热、并行泵、打点、错误兜底 |
+| `aichat/ws.py` | v2 WebSocket 端点（附录 B）：hello 鉴权、二进制音频、轮次控制、abort 预留 |
 | `aichat/frames.py` | 设备帧流封装（0x01/0x02 + u16 BE）+ 80/320ms 重切块 —— 与固件 `ai_frames.c` 对称 |
 | `aichat/asr_volc.py` | 火山大模型流式识别 v3（bigmodel_async）WS 客户端 |
 | `aichat/llm_deepseek.py` | deepseek 流式（openai 兼容），系统提示词在 `config.py` |
 | `aichat/tts_volc.py` | 火山双向流式 TTS V3 客户端（连接跨轮复用） |
 | `aichat/splitter.py` | A.5 分句器（默认关，见协议对照表第 4 条） |
 | `aichat/session_store.py` | 10 轮上下文、会话锁、TTS 连接空闲回收、文字留痕开关 |
-| `tests/fake_device.py` | 模拟设备对拍器：chunked 上行 + 帧流解析，无真机即可联调 |
+| `tests/fake_device.py` | 模拟设备对拍器：`--ws` 走 v2 长连接，默认 v1 chunked 上行 + 帧流解析 |
 
 ## 快速开始
 
@@ -86,35 +88,88 @@ LLM 完 ──► {"t":"reply"}          TTSResponse(16k PCM) ── 重切 80/3
 6. **设备鉴权**：`X-Device-Id` 白名单 + 可选 token。当前是明文 HTTP，token 只防误用不防
    抓包——升级 HTTPS + 域名前这层仅作占位（A.12 #1，与固件 my_client.h 的 TODO 同步）。
 
-## 部署（81.71.24.233）
+## 部署（<SERVER_IP> 实际布局）
+
+代码在 `/home/DC1/aichat/server`（`.venv` 虚拟环境），systemd 常驻 `aichat.service`
+（`User=DC1`，`EnvironmentFile=.env`，监听 `127.0.0.1:8021`），nginx 80 端口反代
+`/api/v1/` + `/healthz` → 8021（`proxy_request_buffering off` + `proxy_buffering off`
+保流式）。改代码后的发布流程：
 
 ```bash
-# systemd：/etc/systemd/system/aichat.service
-[Unit]
-Description=AI-Safety-Inspection chat orchestrator
-After=network.target
-
-[Service]
-WorkingDirectory=/opt/aichat/server
-EnvironmentFile=/opt/aichat/server/.env
-ExecStart=/opt/aichat/server/.venv/bin/python -m aichat.main
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
+rsync server/ DC1:/home/DC1/aichat/server/        # 或 git pull
+ssh DC1 'sudo systemctl restart aichat'           # sudo 密码=登录密码，需手动执行
+curl http://<SERVER_IP>/healthz
 ```
 
-端口 80 需要 root 或 `setcap 'cap_net_bind_service=+ep' .venv/bin/python`；
-或 `PORT=8080` + nginx 反代（顺便挂证书，为 HTTPS 升级铺路）。
+### v2 需要的 nginx 变更（WS 经 80 端口，需 sudo 手动应用）
+
+在 `server` 块里现有 `location /api/v1/` 旁新增（`nginx -t` 通过后 `nginx -s reload`）：
+
+```nginx
+        # v2 WebSocket 长连接（附录 B）
+        location /ws/v1 {
+            proxy_pass http://127.0.0.1:8021;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_buffering off;
+            proxy_read_timeout 3600s;    # 长连接：nginx 默认 60s 会踢空闲 WS
+            proxy_send_timeout 3600s;
+        }
+```
+
+设备端 URL：`ws://<SERVER_IP>/ws/v1`（80 端口）。TLS+域名维持 A.12 #1 待定
+（2026-11-10 决定：不用 cloudflared 隧道，继续 IP+端口）。
 
 ## 联调步骤（对应设备端 README 第 8 节）
 
 1. `python tests/fake_device.py --greeting` → 应打印 `event: {"t":"reply"...}` 和音频统计；
    `--save reply.wav` 听音色（缺 key 时得到 `err` 事件，属预期）。
 2. `python tests/fake_device.py --seconds 2` → 走完整 ASR→LLM→TTS 链路。
-3. 设备指向服务器（`SERVER_BASE` 已是 81.71.24.233），验证 A.7 验收表 1/2/4：
+3. v2 冒烟（`--ws`）：`python tests/fake_device.py --ws --greeting` 与 `--ws --seconds 2`，
+   输出多一行 `welcome` 事件即协议通；`--abort` 验证打断预留路径（回 `aborted`）。
+4. 设备指向服务器（`SERVER_BASE` 已是 <SERVER_IP>），验证 A.7 验收表 1/2/4：
    说"你好，讲个故事"看 `e2e_first_audio_ms`；连续 5 轮；服务器停服看设备 300ms 兜底。
+
+## v2 · WebSocket 长连接（附录 B，2026-11-10 服务端已落地）
+
+v1 HTTP 轮次制一问一答，结构上做不到全双工与打断（B.0 动机）。v2 用一条 WS 长连接
+承载音频与控制消息，**轮次编排与 v1 完全同一份代码**（`pipeline.run_turn` 传输无关），
+v1 HTTP 保留为降级路径（B.2：WS 建连失败自动回退）。
+
+### 消息约定（与固件 ai_frames.c 对称，下行解析器零改动）
+
+| 方向 | 类型 | 内容 |
+| --- | --- | --- |
+| 上行 | text | `{"t":"hello","device":"DC1","token":"..."}` 连接后第一条，鉴权（白名单+可选 token，同 v1） |
+| 上行 | text | `{"t":"turn_start","turn":N}` 开始说话轮，随后 binary 音频 |
+| 上行 | text | `{"t":"utterance_end"}` 一句说完（设备 VAD 是权威信号） |
+| 上行 | text | `{"t":"greeting"}` 开机问候轮（无音频） |
+| 上行 | text | `{"t":"abort"}` **打断（预留）**：设备端 AEC 确认前不启用；服务端语义已实现（取消当轮+作废 TTS 连接+回 `aborted`） |
+| 上行 | binary | 裸 PCM16LE/16k/单声道，与 v1 chunked body 同字节流，无帧头 |
+| 下行 | binary | **一条消息 = 一帧**（0x01 音频 / 0x02 JSON），首帧 `welcome`，其后 asr/reply/done/err 与 v1 相同 |
+
+### 语义要点
+
+- **会话按 device_id 键入**（`ws:<device>`）：断线重连后重发 hello 即恢复 10 轮上下文
+  （B.2），TTL 由 `SESSION_TTL_MS` 兜底回收；v1 的按 X-Session-Id 机制不变。
+- **轮内看门狗**（`WS_TURN_IDLE_MS`，默认 10s）：turn_start 后长时间无上行消息，
+  按说完收尾——对应 v1"设备不发终止块则请求悬挂"的主动兜底。
+- **单轮上限**（`WS_MAX_AUDIO_BYTES`=480KB=15s，A.3.1）：超过截断，按已收内容识别。
+- **协议级心跳**（`WS_HEARTBEAT_S`=30）：aiohttp 自动 ping/pong，断线探测交给协议层。
+- 同轮异常（火山 55000000 等）回 `err` 事件后**连接保持**，下一轮照常——v1 是整条
+  HTTP 响应结束，v2 不必重连。
+
+### 同次落地的 v1 修复
+
+- **问候轮出声 bug**：v1 问候轮只发 reply/done 事件、从未启动收帧泵（`send_text`
+  喂完火山后无人收音频，fake_device 实测 0 音频帧）。现与对话轮共用
+  pump+FinishSession+drain 路径，设备端能听到问候语。
+- 移除 TEMP-DIAG 上行 PCM 落盘（`/tmp/aichat_last_audio.pcm`，55000000 排查已结案；
+  A.10 音频不落盘）。如复发需要原始样本，重加这三行即可。
+
+## 部署（<SERVER_IP> 实际布局）
 
 ## 待实测校准点（代码里已标注）
 
