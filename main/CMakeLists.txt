@@ -8,5 +8,6 @@
 idf_component_register(SRCS "hello_world_main.c"
                             "Mpu6050.cpp"
                             "QMC5883.cpp"
+                            "PWR.cpp"
                     PRIV_REQUIRES spi_flash driver esp_driver_i2c esp_timer
                     INCLUDE_DIRS ".")
