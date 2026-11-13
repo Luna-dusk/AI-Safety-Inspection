@@ -5,6 +5,7 @@
 #include "multinet_cmd.h"
 #include "myesp_now.h"
 #include "fall_det.h"
+#include "PWR.h"
 #include "chat.h"
 #include "my_client.h"
 #include "esp_log.h"
@@ -57,6 +58,15 @@ static void fall_det_evt_cb(fall_det_event_t evt, float pitch, float roll, void 
 
 void app_main(void)
 {
+    /* 0. 电源自锁：**必须是第一行业务代码**（mzx 分支 PWR 模块）。
+     *    K1 松手后主开关栅极只靠 C18(22µF) 撑 2.2s（τ=R11×C18=100k×22µF）；
+     *    下面 I2S/WiFi/AFE 初始化加起来几百毫秒，晚了会"上电→掉电→重启"
+     *    死循环，而且掉得太快串口都抓不到。这里失败说明 2.2s 后必然断电，
+     *    所以只记日志、继续跑（至少串口能看到根因）。 */
+    if (pwr_init() != ESP_OK) {
+        ESP_LOGE(TAG, "pwr_init failed -> 2.2s 后必然断电，检查 GPIO40/GPIO18");
+    }
+
     /* 传感器尚未接线期间静音 i2c.master 驱动日志：每帧 NACK 会刷三行、把有用
      * 信息全淹掉（fall_det 自己的 L1/L2/L3 汇总日志仍然保留）。
      * 接上 MPU6050/QMC5883L 之后删掉这一行，恢复 I2C 错误可见性。 */

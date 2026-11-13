@@ -122,6 +122,19 @@ esp_err_t QMC5883_Init(void)
         /* 首次转换需要时间，等一下再读，避免拿到上电默认值 0 */
         vTaskDelay(pdMS_TO_TICKS(20));
 
+        /* 5. 回读验证 MODE=01（连续测量）。
+         *    软复位会把 CTRL1 清 0 → Standby，如果前面任何一句失败，CTRL1 就没写，
+         *    芯片永远不测量，但每次事务照样 ACK —— 数据恒 0。
+         *    和 MPU6050 的"停在 SLEEP 但照样 ACK"是同一类坑（mzx 分支修复）。 */
+        uint8_t ctrl1 = 0;
+        if (QMC5883_Read(QMC5883_ContrReg_1, &ctrl1, 1) != ESP_OK) {
+                return ESP_FAIL;
+        }
+        if ((ctrl1 & 0x03) != 0x01) {
+                ESP_LOGE(TAG, "CTRL1 回读 0x%02X，MODE!=01（仍 Standby），磁力计不会出数据", ctrl1);
+                return ESP_ERR_INVALID_STATE;
+        }
+
         ESP_LOGI(TAG, "初始化完成: ±8G / ODR 50Hz / OSR 512 / SET-RESET 已开 / 指针回卷已开");
         return ESP_OK;
 }
@@ -141,6 +154,13 @@ esp_err_t QMC5883_GetData(int16_t *x, int16_t *y, int16_t *z)
         *x = (int16_t)(((uint16_t)buffer[1] << 8) | buffer[0]);
         *y = (int16_t)(((uint16_t)buffer[3] << 8) | buffer[2]);
         *z = (int16_t)(((uint16_t)buffer[5] << 8) | buffer[4]);
+
+        /* 全 0 = 芯片没在测量。真实地磁一定不为 0，三轴同时精确为 0 不可能。
+         * 报 ESP_ERR_NOT_FINISHED 而不是总线错误：这不是线断了，是没数据。 */
+        if (buffer[0] == 0 && buffer[1] == 0 && buffer[2] == 0 &&
+            buffer[3] == 0 && buffer[4] == 0 && buffer[5] == 0) {
+                return ESP_ERR_NOT_FINISHED;
+        }
 
         /* 量程溢出说明铁磁物太近、数据已经削顶，这种值参与解算会把航向带偏，
          * 必须丢掉。用独立错误码和"总线读失败"区分：这不是故障，是环境。 */

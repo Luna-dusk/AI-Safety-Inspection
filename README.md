@@ -45,14 +45,15 @@ components/BSP/
   AFE_SR/       ESP-SR 前端：feed/fetch 双任务、VAD、唤醒事件
   AI_CHAT/      云链路三模块：AI_FRAMES（帧解析）/ Transport（WS+HTTP 双模式）/ CHAT（编排）
   IMU/          MPU6050 + QMC5883L 驱动（I2C 总线唯一所有者在此）
-  FALL_DET/     跌倒检测：50Hz 采集 + 姿态融合 + 跌倒状态机
+  FALL_DET/     跌倒检测：50Hz 采集 + 姿态融合 + 跌倒状态机（含 CSV 采集模式）
+  PWR/          电源自锁：GPIO40 维持脉冲 + 电源键长按关机（必须在 app_main 最前）
   WIFI/         SoftAP 配网（portal.html 内嵌）+ STA 管理 + 网络诊断
   MultiNet/     离线命令词
   ESP_NOW/      双机互联骨架
   KEY/LED_Driver/LCD/   按键 / LED / LCD（LCD 暂为 stub）
 main/           应用入口（启动序列 + 各模块接线）
 server/         自建编排层（aiohttp）：/api/v1/chat（v1）、/ws/v1（v2）、/healthz
-tools/          兜底提示音生成脚本
+tools/          兜底提示音生成脚本 + fall_log.py/fall_check.py（FALL_DET CSV 采集与分析）
 ui/             8 屏交互原型与视觉规范
 ```
 

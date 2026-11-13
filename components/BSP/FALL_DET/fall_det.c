@@ -51,6 +51,39 @@
 #include "QMC5883.h"
 #include "QMC5883_reg.h"
 
+/* ==================================================================
+ * 采集模式（移植自 mzx 分支 fall_dat.cpp）—— 现场调参用
+ *
+ * 置 1 后：静音所有日志、每帧输出一行 CSV 到 stdout，配合
+ *   tools/fall_log.py  串口抓成 csv
+ *   tools/fall_check.py 离线算采样率/静止值/峰值/磁模值
+ * 用来验证"静止 |a|≈1g、|m| 25~65µT、峰值不削顶"三项验收，以及跌倒样本回放。
+ *
+ * 注意：调试完一定改回 0 —— 开着会静音全部日志（含传感器故障）。
+ * ================================================================== */
+#define FALL_DET_CSV_MODE	0		/* 采集数据时改 1 */
+#define CSV_MARK_GPIO		GPIO_NUM_0	/* 打标记按键，与 KEY 组件的 BOOT 脚同脚 */
+
+#if FALL_DET_CSV_MODE
+#include "driver/gpio.h"
+
+static bool s_mark_prev = false;
+
+static void csv_head(void)
+{
+	printf("# t_us,ax,ay,az,gx,gy,gz,mx,my,mz,mag_ok\n");
+}
+
+static void csv_frame(int64_t t_us, int16_t ax, int16_t ay, int16_t az,
+		      int16_t gx, int16_t gy, int16_t gz,
+		      int16_t mx, int16_t my, int16_t mz, uint8_t mag_ok)
+{
+	printf("%lld,%d,%d,%d,%d,%d,%d,%d,%d,%d,%u\n",
+	       (long long)t_us, ax, ay, az, gx, gy, gz, mx, my, mz,
+	       (unsigned)mag_ok);
+}
+#endif
+
 /* ===================== 参数（调参只动这里） ===================== */
 
 #define Sensor_DT			0.02f		/* 20ms -> 50Hz（三处联动，见文件头） */
@@ -420,7 +453,10 @@ static void recover_step(uint32_t *err_run, float pitch, float roll)
 	if (*err_run == ERR_L1_FRAMES) {
 		s_stats.l1++;
 		ESP_LOGW(TAG, "IMU 连续失败 %u 帧 → L1 复位总线", (unsigned)*err_run);
-		if (I2C_Recover() == ESP_OK && Mpu6050_GetID() == MPU6050_ID_VALUE) {
+		/* L1 探针用 id != 0（有任何应答即算总线通了）而不是 == MPU6050_ID_VALUE：
+		 * GY-521 克隆板大量贴 MPU6500/9250，who_am_i 根本不是 0x68，但寄存器布局
+		 * 兼容。用严格值判断会让兼容器件永远卡在 L1 升不到 L2 重初始化。 */
+		if (I2C_Recover() == ESP_OK && Mpu6050_GetID() != 0) {
 			*err_run = 0;
 		}
 		return;
@@ -580,6 +616,30 @@ static void fall_fsm(float pitch, float roll, float acc_norm, float dt_ms)
 static void fall_det_task(void *pv)
 {
 	(void)pv;
+#if FALL_DET_CSV_MODE
+	/* ---- 采集模式第一步：静音 ----
+	 * 日志会撕碎 CSV 行，必须在任何输出之前关掉。
+	 * 注意 "*" 会把下面所有 ESP_LOGE/ESP_LOGW 一起静音（含 IMU 初始化失败），
+	 * 所以采数据时如果一颗传感器挂了，你只能从 mag_ok 列和 ‖a‖ 看异常。 */
+	esp_log_level_set("*", ESP_LOG_NONE);
+
+	/* 不关缓冲，数据会攒着不吐、时间戳和对数错位 */
+	setvbuf(stdout, NULL, _IONBF, 0);
+
+	/* 按键脚：与 KEY 组件同配置，重复 config 无副作用 */
+	gpio_config_t mk = {0};
+	mk.pin_bit_mask = 1ULL << CSV_MARK_GPIO;
+	mk.mode = GPIO_MODE_INPUT;
+	mk.pull_up_en = GPIO_PULLUP_ENABLE;
+	mk.pull_down_en = GPIO_PULLDOWN_DISABLE;
+	mk.intr_type = GPIO_INTR_DISABLE;
+	gpio_config(&mk);
+
+	/* 等 USB 转串口枚举完成，否则头几行会丢 */
+	vTaskDelay(pdMS_TO_TICKS(300));
+	csv_head();
+#endif
+
 	ESP_LOGI(TAG, "任务启动: 50Hz, 优先级 8, 栈 4096, 核 1");
 
 	/* ---- 初始化：总线 → 两颗传感器（失败不装死，恢复阶梯接手）---- */
@@ -659,6 +719,20 @@ static void fall_det_task(void *pv)
 		const float acc_norm = sqrtf(acc_x * acc_x + acc_y * acc_y + acc_z * acc_z);
 
 		fall_fsm(pitch, roll, acc_norm, dt * 1000.0f);
+
+#if FALL_DET_CSV_MODE
+		/* 每帧都输出，磁力计失败帧也输出（mag_ok=0）。
+		 * 丢帧会让离线分析误判采样率掉了，宁可标"这次没读到"也不留空洞。 */
+		csv_frame(now_us, s_ax, s_ay, s_az, s_gx, s_gy, s_gz,
+			  s_hx, s_hy, s_hz, (s_mag_status == 0) ? 1 : 0);
+
+		/* 按键下降沿打标记：一次按下只打一行，按住不会连打 */
+		const bool mark_lvl = (gpio_get_level(CSV_MARK_GPIO) == 0);
+		if (mark_lvl && !s_mark_prev) {
+			printf("MARK,%lld\n", (long long)now_us);
+		}
+		s_mark_prev = mark_lvl;
+#endif
 
 #if FALL_DET_SUMMARY_LOG
 		/* 1s 汇总：三个验收数字（静止 ‖a‖≈1g / ‖m‖ 25~65µT / 角度合理） */

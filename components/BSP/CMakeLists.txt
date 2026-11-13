@@ -9,6 +9,7 @@ set(src_dirs
                 "ESP_NOW"
                 "IMU"
                 "FALL_DET"
+                "PWR"
                 "AI_CHAT/AI_FRAMES"
                 "AI_CHAT/Transport"
                 "AI_CHAT/CHAT")
@@ -25,6 +26,7 @@ set(include_dirs
                 "ESP_NOW"
                 "IMU"
                 "FALL_DET"
+                "PWR"
                 "AI_CHAT/AI_FRAMES"
                 "AI_CHAT/Transport"
                 "AI_CHAT/CHAT"
