@@ -94,7 +94,26 @@ python tests/test_record_replay.py
 
 ## 与 AI 语音工程的关系
 
-参考 `ai_client/components/BSP/I2S/i2s.h` 中的 `I2S_DUAL_MIC_NS_ENABLE` 当前为 0，注释记录了第二麦产噪和 VAD 不结束的现象。该工程的自适应步长也设为 0。先用本工程确认第二麦和双时隙采集，再接入 AI 流程。
+参考 `ai_client/components/BSP/I2S/i2s.h` 中的 `I2S_DUAL_MIC_NS_ENABLE` 当前为 0，注释记录了第二麦产噪和 VAD 不结束的现象。该工程的自适应步长也设为 0。
+
+**2026-11-13 更新（AI 工程侧）**：AI-Safety-Inspection 已不再自己写双麦降噪，改为
+把**两路原始信号**（通道交错，`receive_audio_stereo()`）直接喂给 esp-sr 的 AFE：
+`afe_config_init("MM", ...)`。理由正是上面那条踩坑记录——手写差分/自适应会把目标
+人声一起削掉，空间的事交给按双麦几何关系调过的算法。
+
+按 esp-sr 官方 benchmark（ESP32-S3 段），双麦配置的实际流水线是
+`AEC -> SE(BSS) -> VAD -> WakeNet`，**没有 NS**：`afe_config_check()` 的规则是
+"双通道时 SE(BSS) 优先于 NS"，也就是 BSS 把 NS 顶掉。所以这条路买到的是
+**空间分离**（目标声源 vs 其他方向的干扰），不是稳态噪声抑制；要压扩散性环境噪声
+需要另挂 nsnet2（单通道，S3 支持，但本工程未启用）。
+
+官方给出的代价：internal RAM 49.1 KB → 82.2 KB，PSRAM 775.8 KB → 1198.2 KB，
+feed CPU 15.9% → 46.2%（单核），fetch CPU 15.7% → 32.4%。另注：官方的
+GSC 波束形成、NN Beamforming 都只支持 ESP32-P4 / ESP32-S31，**不支持 S3**，
+所以 S3 上双麦空间降噪只有 AFE 的 BSS 这一条路。
+
+本工程的"分别验证两路电平"仍是上板前的必要步骤：BSS 要有效，两路必须都是
+真实、独立、同步采样的信号，且两颗麦要有间距、目标声源在正前方。
 
 本工程没有自适应降噪、波束形成或声学回声消除。若后续希望 AI 播报时仍可打断对话，还需评估播放参考信号和 AEC；两颗麦本身不保证这些能力。
 

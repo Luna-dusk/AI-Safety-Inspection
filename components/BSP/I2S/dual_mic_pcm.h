@@ -58,15 +58,38 @@ static inline int16_t dual_mic_mix(int32_t left, int32_t right, dual_mic_mode_t 
 /* Q16 DC tracking avoids integer-rounding dead zones. No adaptive noise
  * cancellation: preserve both microphones for independent hardware checks.
  * left/right are the two 32-bit I2S slots of one frame, passed by value. */
-static inline int16_t dual_mic_process(dual_mic_filter_t *filter,
-                                     int32_t left, int32_t right, dual_mic_mode_t mode)
+static inline void dual_mic_dc_remove(dual_mic_filter_t *filter, int32_t pcm[2])
 {
-    int32_t pcm[2] = {dual_mic_pcm16(left), dual_mic_pcm16(right)};
     for (int ch = 0; ch < 2; ++ch) {
         filter->dc_q16[ch] += ((int64_t)pcm[ch] * 65536 - filter->dc_q16[ch]) / 256;
         pcm[ch] -= (int32_t)(filter->dc_q16[ch] / 65536);
     }
+}
+
+static inline int16_t dual_mic_process(dual_mic_filter_t *filter,
+                                     int32_t left, int32_t right, dual_mic_mode_t mode)
+{
+    int32_t pcm[2] = {dual_mic_pcm16(left), dual_mic_pcm16(right)};
+    dual_mic_dc_remove(filter, pcm);
     return dual_mic_mix(pcm[0], pcm[1], mode);
+}
+
+/* 双通道原样输出（每声道各自去直流），供 esp-sr 双麦 AFE 使用：
+ * out[0] = 左时隙那颗麦，out[1] = 右时隙那颗麦，两路都保留。
+ *
+ * 这里刻意不做任何"降噪"——差分/自适应滤波会把目标人声一起削掉（源工程
+ * 的 I2S_DUAL_MIC_NS_ENABLE 就是这么翻车的：第二麦产噪 + VAD 不结束）。
+ * 两颗麦交给 esp-sr AFE 的 SE(BSS) 做空间分离：官方 S3 流水线是
+ * "SE(BSS) -> VAD -> WakeNet"，注意它**不含 NS**（双通道时 BSS 把 NS 顶掉），
+ * 所以这一层买到的是"分离不同方向的声源"，不是"压稳态噪声"。 */
+static inline void dual_mic_process_stereo(dual_mic_filter_t *filter,
+                                          int32_t left_slot, int32_t right_slot,
+                                          int16_t out[2])
+{
+    int32_t pcm[2] = {dual_mic_pcm16(left_slot), dual_mic_pcm16(right_slot)};
+    dual_mic_dc_remove(filter, pcm);
+    out[0] = dual_mic_saturate(pcm[0]);
+    out[1] = dual_mic_saturate(pcm[1]);
 }
 
 #endif

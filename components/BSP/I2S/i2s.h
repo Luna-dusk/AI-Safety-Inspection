@@ -19,8 +19,10 @@
 
 #define I2S_SAMPLE_RATE      16000
 #define I2S_BLOCK_FRAMES     128
-#define SPK_VOLUME           0.7f
+#define SPK_VOLUME           0.95f
 #define I2S_RECORD_SECONDS   3
+/* 仅对 receive_audio()（单声道混音路径）与录放自测生效。
+ * 语音主链路走 receive_audio_stereo()，不受这个宏影响——AFE 要的是两路原始信号。 */
 #define I2S_INITIAL_MODE     DUAL_MIC_LEFT
 
 /**
@@ -83,6 +85,14 @@ void boot_init(void);
  * @note   常驻约 96 KB 静态缓冲；与 AFE 音频管线互斥。
  */
 void i2s_loopback_task(void *arg);
+
+/**
+ * @brief  扬声器响度自测任务（开机播一段语音，验证 5V 供电响度/喇叭余量）
+ *
+ * 编译期开关在 spk_selftest.c 的 SPK_SELFTEST_ON_BOOT；关掉后本函数为空，
+ * 可以安全地留在 main 里。播放走 i2s_spk_write()，与业务同一条通路。
+ */
+void spk_selftest_start(void);
 
 /* ══════════ 音频帧管线（AFE / MultiNet / 上传链路共用）══════════ */
 
@@ -155,8 +165,34 @@ esp_err_t i2s_spk_write_silence(int blocks);
  * 并对每声道做 DC 跟踪。混音模式取 I2S_INITIAL_MODE（当前=只取左麦）。
  *
  * @note 与 i2s_loopback_task 争用 I2S1，两者不能同时运行。
+ * @note 语音主链路已改用 receive_audio_stereo()；本接口保留给单麦/自测场景。
  */
 esp_err_t receive_audio(int16_t *buf, size_t len, size_t *bytes_read, TickType_t ticks_to_wait);
+
+/**
+ * @brief  从 I2S1 读取双麦数据，输出**双通道交错**的 PCM16（esp-sr 双麦 AFE 专用）
+ * @param  buf           输出缓冲区，容量必须 >= frames * 2 个 int16_t
+ * @param  frames        需要的帧数（一帧 = 左+右各一个采样）
+ * @param  frames_read   实际写出的帧数（可为 NULL）
+ * @param  ticks_to_wait 每块读取的等待上限
+ * @return ESP_OK 成功（可能是部分读取）；ESP_ERR_INVALID_ARG 参数非法；其它为驱动错误
+ *
+ * 输出布局是 [L0,R0, L1,R1, ...]，与 esp-sr 文档要求的"通道交错"一致：
+ * feed_buff 大小 = feed_chunksize * feed_nch * sizeof(int16_t)，
+ * feed_nch = afe_handle->get_feed_channel_num()。
+ *
+ * 两路各自只做去直流，不做任何混音/差分——空间分离交给 AFE 的 SE(BSS)。
+ * （官方 S3 双麦流水线 AEC -> SE(BSS) -> VAD -> WakeNet 里没有 NS：双通道时
+ *   BSS 顶掉 NS，所以压稳态噪声要靠另外挂 nsnet2，本工程尚未启用。）
+ * 两颗 INMP441 共用 BCLK/WS/SD（靠 L/R 脚分到左右时隙），因此两路是严格同步
+ * 采样的，这正是 BSS 这类空间算法需要的前提。
+ *
+ * @note 与 receive_audio() 共用同一块整帧暂存区，二者不能并发调用
+ *       （当前只有 afe_feed 一个任务会调）。
+ * @note 与 i2s_loopback_task 争用 I2S1，两者不能同时运行。
+ */
+esp_err_t receive_audio_stereo(int16_t *buf, size_t frames, size_t *frames_read,
+                               TickType_t ticks_to_wait);
 
 /**
  * @brief  清空双麦 DC 估计（不重置混音模式）

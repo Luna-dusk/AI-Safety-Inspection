@@ -10,10 +10,23 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 static const char *TAG = "DUAL_MIC";
 static const char *const mode_names[] = {"LEFT", "RIGHT", "AVERAGE", "DIFFERENCE"};
+/** 喇叭写锁：自测/回放/对话可能来自不同任务，串行化避免两路音频插断 */
+static SemaphoreHandle_t s_spk_lock = NULL;
+
+static inline void spk_lock(void)
+{
+    if (s_spk_lock != NULL) xSemaphoreTake(s_spk_lock, portMAX_DELAY);
+}
+
+static inline void spk_unlock(void)
+{
+    if (s_spk_lock != NULL) xSemaphoreGive(s_spk_lock);
+}
 
 typedef struct {
     uint32_t frames;
@@ -155,6 +168,7 @@ void init_i2s(void)
     ESP_ERROR_CHECK(i2s_driver_install(I2S_NUM_0, &speaker, 0, NULL));
     ESP_ERROR_CHECK(i2s_set_pin(I2S_NUM_0, &speaker_pins));
     ESP_ERROR_CHECK(i2s_zero_dma_buffer(I2S_NUM_0));
+    s_spk_lock = xSemaphoreCreateMutex();   /* 必须在任何 i2s_spk_write 之前建好 */
 
     const i2s_config_t microphone = {
         .mode = I2S_MODE_MASTER | I2S_MODE_RX,
@@ -205,8 +219,10 @@ void boot_init(void)
 
 /** 当前扬声器音量，0.0 ~ 1.0；初值取编译期默认 SPK_VOLUME */
 static float s_spk_volume = SPK_VOLUME;
-/** 双麦 DC 跟踪状态，跨调用保持 */
+/** 双麦 DC 跟踪状态，跨调用保持（单声道混音路径） */
 static dual_mic_filter_t s_mic_filter;
+/** 双通道路径的 DC 跟踪状态，与 s_mic_filter 分开，避免两条路径互相污染 */
+static dual_mic_filter_t s_mic_filter_stereo;
 /** 自适应开关（当前没有 LMS 核，仅记录状态） */
 static volatile bool s_mic_adapt = true;
 /** receive_audio() 的整帧读取暂存区 */
@@ -243,6 +259,7 @@ float i2s_spk_get_volume(void)
 void i2s_dual_mic_reset(void)
 {
     memset(&s_mic_filter, 0, sizeof(s_mic_filter));
+    memset(&s_mic_filter_stereo, 0, sizeof(s_mic_filter_stereo));
     ESP_LOGI(TAG, "dual-mic DC estimate reset");
 }
 
@@ -270,8 +287,10 @@ void i2s_dual_mic_set_adapt(bool on)
  * @return ESP_OK 成功（可能是部分读取）；ESP_ERR_INVALID_ARG 参数非法；其它为驱动错误
  *
  * 按 mic_frame_t 整帧读取，每帧经 dual_mic_process() 混成单声道并做 DC 跟踪；
- * 混音模式取 I2S_INITIAL_MODE（当前=只取左麦，与源工程单麦行为一致）。
+ * 混音模式取 I2S_INITIAL_MODE（当前=只取左麦）。
  *
+ * @note 语音主链路已改用 receive_audio_stereo()（双麦要保留两路给 AFE 做 BSS），
+ *       本函数只剩单麦/自测用途；在"MM"配置下调它会白白丢掉第二颗麦的信息。
  * @note 循环补齐：一次 i2s_read 可能只够一部分，凑满 want 个采样才返回。
  * @note 超时或短读时返回已拿到的部分，此时 bytes_read < len 是正常情况，
  *       调用方要按 bytes_read 而不是 len 处理。
@@ -315,6 +334,62 @@ esp_err_t receive_audio(int16_t *buf, size_t len, size_t *bytes_read, TickType_t
 }
 
 /**
+ * @brief  从 I2S1 读取双麦数据，输出双通道交错的 PCM16（esp-sr 双麦 AFE 专用）
+ * @param  buf           输出缓冲区，容量 >= frames * 2 个 int16_t
+ * @param  frames        需要的帧数（一帧 = 左 + 右各一个采样）
+ * @param  frames_read   实际写出的帧数（可为 NULL）
+ * @param  ticks_to_wait 每块读取的等待上限
+ * @return ESP_OK 成功（可能是部分读取）；ESP_ERR_INVALID_ARG 参数非法；其它为驱动错误
+ *
+ * 与 receive_audio() 的区别只有一处：不混成单声道，两路各自去直流后原样交错输出。
+ * 这样 esp-sr AFE 拿到的是严格同步的两路麦克风信号，才能跑 SE(BSS) 做盲源分离
+ * ——目标声源与其它方向的干扰在空间上可分，BSS 把它们分开。注意官方 S3 的双麦
+ * 流水线是 "SE(BSS) -> VAD -> WakeNet"，**不含 NS**（双通道时 BSS 顶掉 NS），
+ * 所以这里拿到的是空间分离，不是稳态噪声抑制。
+ * 任何在本函数里做差分/自适应的"土办法"都会把目标人声一起削掉，源工程
+ * （ai_client）已经踩过这个坑。
+ *
+ * @note 循环补齐：一次 i2s_read 可能只够一部分，凑满 frames 帧才返回。
+ * @note 超时或短读时返回已拿到的部分，此时 frames_read < frames 是正常情况。
+ * @note 与 receive_audio() 共用 s_mic_scratch，二者不能并发（当前只有 afe_feed 会调）。
+ */
+esp_err_t receive_audio_stereo(int16_t *buf, size_t frames, size_t *frames_read,
+                               TickType_t ticks_to_wait)
+{
+    if (buf == NULL || frames == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (frames_read != NULL) *frames_read = 0;
+
+    size_t got = 0;
+    while (got < frames) {
+        size_t chunk = frames - got;
+        if (chunk > MIC_BLOCK_FRAMES) chunk = MIC_BLOCK_FRAMES;
+
+        size_t received = 0;
+        esp_err_t err = i2s_read(I2S_NUM_1, (uint8_t *)s_mic_scratch,
+                                 chunk * sizeof(mic_frame_t),
+                                 &received, ticks_to_wait);
+        if (err != ESP_OK) return err;
+
+        size_t n = received / sizeof(mic_frame_t);
+        if (n == 0) break;                   /* 超时：把已拿到的交出去 */
+
+        for (size_t i = 0; i < n; ++i) {
+            dual_mic_process_stereo(&s_mic_filter_stereo,
+                                    s_mic_scratch[i].left,
+                                    s_mic_scratch[i].right,
+                                    &buf[(got + i) * 2]);
+        }
+        got += n;
+        if (n < chunk) break;                /* 短读：不再等，直接返回 */
+    }
+
+    if (frames_read != NULL) *frames_read = got;
+    return ESP_OK;
+}
+
+/**
  * @brief  向 I2S0 写出指定帧数，处理短写
  * @param  frames 待输出的 PCM16 双声道帧数组
  * @param  count  帧数（不是字节数）
@@ -339,7 +414,18 @@ static esp_err_t write_speaker(const pcm16_frame_t *frames, size_t count)
     return ESP_OK;
 }
 
+static esp_err_t spk_write_nolock(const int16_t *mono, size_t samples);
+static esp_err_t spk_silence_nolock(int blocks);
+
 esp_err_t i2s_spk_write(const int16_t *mono, size_t samples)
+{
+    spk_lock();
+    esp_err_t rc = spk_write_nolock(mono, samples);
+    spk_unlock();
+    return rc;
+}
+
+static esp_err_t spk_write_nolock(const int16_t *mono, size_t samples)
 {
     pcm16_frame_t tx[SPK_BLOCK_FRAMES];      /* 512 B 栈缓冲：避免引入跨任务共享的静态 */
     size_t done = 0;
@@ -359,6 +445,14 @@ esp_err_t i2s_spk_write(const int16_t *mono, size_t samples)
 }
 
 esp_err_t i2s_spk_write_silence(int blocks)
+{
+    spk_lock();
+    esp_err_t rc = spk_silence_nolock(blocks);
+    spk_unlock();
+    return rc;
+}
+
+static esp_err_t spk_silence_nolock(int blocks)
 {
     if (blocks <= 0) blocks = 6;             /* 与 replay_recording 的收尾块数一致 */
     pcm16_frame_t tx[SPK_BLOCK_FRAMES];

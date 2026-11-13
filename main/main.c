@@ -57,8 +57,16 @@ static void fall_det_evt_cb(fall_det_event_t evt, float pitch, float roll, void 
 
 void app_main(void)
 {
+    /* 传感器尚未接线期间静音 i2c.master 驱动日志：每帧 NACK 会刷三行、把有用
+     * 信息全淹掉（fall_det 自己的 L1/L2/L3 汇总日志仍然保留）。
+     * 接上 MPU6050/QMC5883L 之后删掉这一行，恢复 I2C 错误可见性。 */
+    esp_log_level_set("i2c.master", ESP_LOG_NONE);
+
     /* 1. 硬件层最先：装 I2S0(喇叭)/I2S1(双麦) 驱动 */
     init_i2s();
+
+    //测试音频模块
+    //spk_selftest_start();
 
     /* 2. WiFi 独立任务连接，不阻塞启动序列 */
     esp_create_wifi_task();

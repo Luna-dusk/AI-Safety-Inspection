@@ -23,6 +23,33 @@ static SemaphoreHandle_t afe_lock = NULL;
  * 输出数据（esp-sr fetch() 默认超时 ~200ms，持锁阻塞会饿死 feed()）。 */
 static SemaphoreHandle_t fetch_sem = NULL;
 
+/* ===== 送入 AFE 的通道排列（单麦/双麦总开关）=====
+ * 只能填 "M" 或 "MM"，对应 afe_feed_task 里两条不同的 I2S 读取路径。
+ *
+ * 官方（esp-sr docs/benchmark/README.rst，ESP32-S3 段）给出的流水线与开销：
+ *   "MR"  + SR + HIGH_PERF → AEC → VAD → WakeNet
+ *                            internal 49.1 KB, PSRAM 775.8 KB, feed 15.9%, fetch 15.7%
+ *   "MMNR"+ SR + HIGH_PERF → AEC → SE(BSS) → VAD → WakeNet
+ *                            internal 82.2 KB, PSRAM 1198.2 KB, feed 46.2%, fetch 32.4%
+ * 两点必须记住：
+ *   1) 双麦流水线里 **没有 NS**。NS(nsnet2) 只出现在 "MR"+VC 那一路；
+ *      afe_config_check() 的规则是"双通道时 SE(BSS) 优先于 NS"，即 BSS 把 NS 顶掉。
+ *      所以双麦买到的是**空间分离**（把目标声源和别的方向的干扰分开），
+ *      而不是"稳态噪声抑制"——要压扩散性环境噪声还得另加 nsnet2（当前未启用）。
+ *   2) 代价很大：feed CPU 从 ~16% 涨到 ~46%（单核），PSRAM +422 KB。
+ *
+ * 为什么不是 GSC/NN Beamforming：那两个是官方面向双麦/多麦的波束形成方案，但
+ * 文档明确只支持 ESP32-P4 / ESP32-S31，**不支持 ESP32-S3**。S3 上双麦空间降噪
+ * 只有 AFE 的 BSS 这一条官方路径。
+ *
+ * 本机没有播放参考通道（喇叭走 I2S0 TX，不回灌到 I2S1 RX），所以是 "MM" 而不是
+ * 官方示例的 "MMNR"。feed 数据必须是**通道交错**格式。
+ *
+ * 回退：改回 "M" 即恢复 2026-11 之前的单麦行为（afe_feed_task 会自动切回单声道
+ * 读取路径），不需要动别的代码。若上板出现 VAD 不结束 / 识别变差 / 内存不足，
+ * 先回退再排查。 */
+#define AFE_INPUT_FORMAT  "MM"
+
 #define AFE_LOCK()   do { if (afe_lock) xSemaphoreTake(afe_lock, portMAX_DELAY); } while (0)
 #define AFE_UNLOCK() do { if (afe_lock) xSemaphoreGive(afe_lock); } while (0)
 
@@ -277,8 +304,12 @@ static void afe_feed_task(void *arg)
     int chunksize = afe_handle->get_feed_chunksize(data);
     int nch = afe_handle->get_feed_channel_num(data);
     size_t bytes = (size_t)chunksize * (size_t)nch * sizeof(int16_t);
+    /* nch 由 AFE 自己按 input_format 算出（"MM" → 2），不要在这里写死：
+     * 它同时决定"读几路"和"缓冲多大"，两者必须一致，否则 feed() 会读越界。 */
+    const bool stereo = (nch >= 2);
 
-    ESP_LOGI(TAG, "feed: chunksize=%d nch=%d bytes=%u", chunksize, nch, (unsigned)bytes);
+    ESP_LOGI(TAG, "feed: chunksize=%d nch=%d bytes=%u (%s)",
+             chunksize, nch, (unsigned)bytes, stereo ? "dual-mic interleaved" : "mono");
 
     int16_t *buf = (int16_t *)heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (buf == NULL) {
@@ -291,12 +322,24 @@ static void afe_feed_task(void *arg)
     }
 
     while (1) {
-        size_t real_bytes = 0;
-        if (receive_audio(buf, bytes, &real_bytes, portMAX_DELAY) != ESP_OK) {
-            continue;
-        }
-        if (real_bytes < bytes) {
-            continue;
+        if (stereo) {
+            /* 双麦：按"帧"取，输出 [L0,R0, L1,R1, ...] 交错数据，正好是 feed() 要的格式 */
+            size_t frames_read = 0;
+            if (receive_audio_stereo(buf, (size_t)chunksize, &frames_read,
+                                     portMAX_DELAY) != ESP_OK) {
+                continue;
+            }
+            if (frames_read < (size_t)chunksize) {
+                continue;
+            }
+        } else {
+            size_t real_bytes = 0;
+            if (receive_audio(buf, bytes, &real_bytes, portMAX_DELAY) != ESP_OK) {
+                continue;
+            }
+            if (real_bytes < bytes) {
+                continue;
+            }
         }
         AFE_LOCK();
         afe_handle->feed(data, buf);          /* 始终喂，不中断 */
@@ -512,13 +555,20 @@ static void afe_fetch_task(void *arg)
  * @return ESP_OK 成功；ESP_FAIL 模型或实例创建失败
  *
  * 关键配置：
- *   - afe_config_init("M", models, AFE_TYPE_SR, AFE_MODE_HIGH_PERF)
- *     其中 "M" 表示单麦输入；
- *   - aec_init = false（不启用回声消除）；
- *   - wakenet_init = true，优先选 nihaoxiaoxin 唤醒词，找不到就取任意一个。
+ *   - afe_config_init(AFE_INPUT_FORMAT, models, AFE_TYPE_SR, AFE_MODE_HIGH_PERF)
+ *     其中 AFE_INPUT_FORMAT = "MM" 表示**双麦**输入（两颗 INMP441 的左右时隙）；
+ *     双麦时实际流水线是 SE(BSS) → VAD → WakeNet（AEC 本工程关闭），
+ *     BSS 会顶掉 NS —— 双麦买到的是空间分离，不是稳态噪声抑制；
+ *   - aec_init = false（不启用回声消除，仍靠 capture_enabled 软静音隔离播放）；
+ *   - wakenet_init = true，优先选 nihaoxiaoxin 唤醒词，找不到就取任意一个；
+ *   - memory_alloc_mode 保持默认（BALANCE）：官方 GSC 文档实测"数据放 PSRAM 比放
+ *     内部 RAM 多约 25% CPU"，而双麦 feed 已经要 46%，不值得再为省内部 RAM 加
+ *     CPU。内部 RAM 真不够时再改 MORE_PSRAM，别一上来就换。
  *
- * @note 硬件是双麦，但这里按单麦配置，第二颗麦的数据实际未被使用。
- *       这也是 README 里"第二麦产噪、VAD 不结束"现象的根源。
+ * @note 双麦/单麦切换只改 AFE_INPUT_FORMAT 一个宏（详见文件顶部说明），
+ *       afe_feed_task 会自动跟着 get_feed_channel_num() 切读取路径。
+ * @note afe_config_check() 会为消除算法冲突而改写参数（例如双麦时用 BSS 顶掉 NS），
+ *       所以必须在设置完自定义项之后调用，并把返回值当最终配置用。
  * @note 可重复调用：afe_data 非空时直接返回 ESP_OK，不会重复创建实例。
  */
 esp_err_t afe_init(void)
@@ -533,7 +583,8 @@ esp_err_t afe_init(void)
         return ESP_FAIL;
     }
 
-    afe_config_t *afe_config = afe_config_init("M", models, AFE_TYPE_SR, AFE_MODE_HIGH_PERF);
+    afe_config_t *afe_config = afe_config_init(AFE_INPUT_FORMAT, models,
+                                               AFE_TYPE_SR, AFE_MODE_HIGH_PERF);
     if (afe_config == NULL) {
         ESP_LOGE(TAG, "afe_config_init failed");
         return ESP_FAIL;
@@ -541,6 +592,13 @@ esp_err_t afe_init(void)
 
     afe_config->aec_init = false;
     afe_config->wakenet_init = true;
+    /* memory_alloc_mode 故意不动：官方基准数据就是默认配置下测的
+     * （S3 / MMNR / SR / HIGH_PERF = internal 82.2 KB + PSRAM 1198.2 KB）。
+     * 把它改成 MORE_PSRAM 会把更多热数据推到 PSRAM，官方 GSC 文档实测这种
+     * 迁移要多花约 25% CPU，而 feed 已经 46% 了。 */
+    ESP_LOGI(TAG, "AFE mem before create: internal %u free, psram %u free",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     /* 顺便初始化 LED 和本地命令 */
     LED_Init();
@@ -556,6 +614,29 @@ esp_err_t afe_init(void)
         ESP_LOGI(TAG, "WakeNet model: %s", wake_name);
     } else {
         ESP_LOGW(TAG, "no WakeNet model in partition, check menuconfig NIHAOXIAOXIN");
+    }
+
+    /* 交给库做一致性检查：它会按芯片能力/通道数裁剪互相冲突的算法
+     * （典型：input 两通道时 SE(BSS) 优先，NS 被关；反之若 BSS 不可用，
+     *  就只保留第一路麦克风——那等于又退回单麦）。返回值为最终配置。 */
+    afe_config_t *checked = afe_config_check(afe_config);
+    if (checked != NULL) {
+        afe_config = checked;
+    }
+    afe_config_print(afe_config);
+
+    const int  cfg_mics = afe_config->pcm_config.mic_num;
+    const bool cfg_se   = afe_config->se_init;
+    ESP_LOGI(TAG, "AFE cfg: input=%s mic=%d se(BSS)=%d ns=%d aec=%d",
+             AFE_INPUT_FORMAT, cfg_mics, (int)cfg_se,
+             (int)afe_config->ns_init, (int)afe_config->aec_init);
+    /* 判据用 se_init 而不是 mic_num：mic_num 由 input_format 决定，永远是 2；
+     * 真正决定"第二颗麦有没有被用上"的是 BSS 是否使能。官方文档原话——
+     * "If SE(BSS) algorithm is deactivated, will only use the first microphone
+     * channel"——也就是说 BSS 关掉时不会有任何报错，只是**静默退回单麦**。
+     * 双麦若还兼着 ns_init，那是 BSS 没生效、走回了单通道 NS 路线的信号。 */
+    if (cfg_mics >= 2 && !cfg_se) {
+        ESP_LOGW(TAG, "BSS 未使能：AFE 只用第一路麦（等价单麦），双麦降噪不生效");
     }
 
     afe_handle = esp_afe_handle_from_config(afe_config);
@@ -574,7 +655,33 @@ esp_err_t afe_init(void)
         return ESP_FAIL;
     }
 
+    /* 打点：feed/fetch 的实际帧长与通道数——上板第一眼就该看这行。
+     * feed_nch=2 只说明"AFE 期望两路输入"（由 input_format 决定），
+     * 是否真的用上了第二路仍然看上面的 se(BSS) 日志。 */
+    int feed_chunk = afe_handle->get_feed_chunksize(afe_data);
+    int feed_nch   = afe_handle->get_feed_channel_num(afe_data);
+    int fetch_chunk = afe_handle->get_fetch_chunksize(afe_data);
+    int fetch_nch   = afe_handle->get_fetch_channel_num(afe_data);
     ESP_LOGI(TAG, "AFE init ok (WakeNet on, session mode)");
+    ESP_LOGI(TAG, "AFE io: feed %d x %dch, fetch %d x %dch",
+             feed_chunk, feed_nch, fetch_chunk, fetch_nch);
+    /* 实测占用 vs 官方基准（S3 / MMNR / SR / HIGH_PERF：internal 82.2 KB、
+     * PSRAM 1198.2 KB）。差值明显偏大说明有别的模块在抢，先查这里再怀疑音频。 */
+    ESP_LOGI(TAG, "AFE mem after create: internal %u free, psram %u free "
+             "(official MMNR/SR/HIGH_PERF: ~82 KB int + ~1198 KB psram used)",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    if (feed_nch != cfg_mics) {
+        ESP_LOGW(TAG, "feed_nch(%d) != cfg mic_num(%d), check input_format", feed_nch, cfg_mics);
+    }
+
+    /* MultiNet 直接吃 fetch 出来的单通道数据，帧长必须与模型要求一致，
+     * 不一致会表现为"命令永远识别不出来"而不是报错，所以这里提前喊一声。 */
+    int mn_chunk = multinet_cmd_chunksize();
+    if (mn_chunk > 0 && mn_chunk != fetch_chunk) {
+        ESP_LOGW(TAG, "MultiNet chunksize(%d) != fetch chunksize(%d), 命令词可能不触发",
+                 mn_chunk, fetch_chunk);
+    }
     return ESP_OK;
 }
 /**

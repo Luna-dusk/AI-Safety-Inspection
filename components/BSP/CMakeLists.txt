@@ -56,5 +56,6 @@ set(requires
 
 # 配网页 portal.html 内嵌进固件（wifi_provision.c 引用 _binary_portal_html_*）
 idf_component_register(SRC_DIRS ${src_dirs} INCLUDE_DIRS ${include_dirs} REQUIRES ${requires}
-                       EMBED_TXTFILES "WIFI/portal.html")
+                       EMBED_TXTFILES "WIFI/portal.html"
+                       EMBED_FILES "I2S/spk_test.pcm")
 component_compile_options(-ffast-math -O3 -Wno-error=format -Wno-format)
