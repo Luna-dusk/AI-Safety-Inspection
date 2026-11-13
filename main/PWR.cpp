@@ -151,6 +151,8 @@ esp_err_t pwr_init(){
             .arg =  NULL,
             .dispatch_method = ESP_TIMER_TASK,
             .name = "PWR",
+            /* 指定初始化器必须把字段补全，否则 -Wmissing-field-initializers 会报警 */
+            .skip_unhandled_events = false,
         };
 
         ESP_RETURN_ON_ERROR(esp_timer_create(&arg, &s_timer), TAG, "timer is created");

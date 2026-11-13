@@ -18,7 +18,8 @@
 #include "Mpu6050.h"
 #include "Mpu6050_reg.h"
 #include "QMC5883.h"
-#include "QMC5883_reg.h"
+#include "fall_dat.h"
+#include "PWR.h"
 
 /* ==================================================================
  * 一、参数
@@ -88,9 +89,18 @@ static float GyroBiasY = 0.0f;
 static float GyroBiasZ = 0.0f;
 static uint8_t GyroCalibrated = 0;
 
-/* 磁场状态：0 正常 / 1 读失败 / 2 量程溢出（OVL）。
+/* 磁场状态：0 正常 / 1 读失败 / 2 量程溢出（OVL）/ 3 器件不在线。
  * 溢出是环境干扰（喇叭磁铁、铁门），不是总线故障，绝不能触发总线恢复 */
 static uint8_t MagStatus = 0;
+
+/* 磁力计是否在线。init 失败就是 false，之后每 1s 才探一次。
+ * 为什么必须这样：磁力计没焊时若每帧都读，50Hz × 每次 3 行 NACK 日志 =
+ * 每秒 150 行 i2c.master 错误，115200 下占用约 9KB/s（满速 11.5KB/s），
+ * 串口被刷满、真正的故障信息全被冲走，还白烧总线带宽。 */
+static bool MagPresent = false;
+static uint32_t MagRetryCount = 0;	/* 不在线时：距下次探测的帧数 */
+static uint32_t MagFailRun = 0;		/* 在线时：连续读失败帧数 */
+#define MAG_RETRY_FRAMES	50	/* 1s 探一次；也是"连续失败多久判掉线" */
 
 /* 磁场模值基准（µT），开机前 50 帧求均值得到，用于判定"地磁是否被干扰" */
 static float MagBaseNorm = 0.0f;
@@ -163,19 +173,30 @@ void IMU_CalibrateGyro(void)
 
 	/* ---- 阶段一：等静止 ---- */
 	bool still = false;
+	uint32_t read_fail = 0;
 	const uint32_t max_attempts = CALI_MAX_WAIT_MS / 20;
 	for (uint32_t i = 0; i < max_attempts; i++) {
 		int16_t aX, aY, aZ, bX, bY, bZ;
-		if (Mpu6050_Get_Data(&aX, &aY, &aZ, &bX, &bY, &bZ) == ESP_OK &&
-		    imu_is_still(aX, aY, aZ, bX, bY, bZ)) {
+		const esp_err_t e = Mpu6050_Get_Data(&aX, &aY, &aZ, &bX, &bY, &bZ);
+		if (e != ESP_OK) {
+			read_fail++;
+		} else if (imu_is_still(aX, aY, aZ, bX, bY, bZ)) {
 			still = true;
 			break;
 		}
 		vTaskDelay(pdMS_TO_TICKS(20));
 	}
 	if (!still) {
-		ESP_LOGW(TAG, "等待静止超时（%d ms），跳过本次校准；零偏按 0 处理，"
-			      "航向会持续漂移，请静止后重新上电", CALI_MAX_WAIT_MS);
+		/* 把"没数据"和"在动"分开报：这两种情况的处置完全不同，
+		 * 混成一句"等待静止超时"会把人引向错误的排查方向 */
+		if (read_fail > max_attempts / 2) {
+			ESP_LOGE(TAG, "校准失败：%u/%u 帧读不到数据 —— 先解决通信，再谈校准"
+				      "（零偏按 0 处理）",
+				 (unsigned)read_fail, (unsigned)max_attempts);
+		} else {
+			ESP_LOGW(TAG, "等待静止超时（%d ms），设备可能在动；零偏按 0 处理，"
+				      "航向会持续漂移，请静止后重新上电", CALI_MAX_WAIT_MS);
+		}
 		return;
 	}
 
@@ -241,14 +262,25 @@ void IMU_CalibrateGyro(void)
 	GyroBiasY = mean_lsb[1] / MPU6050_GYRO_SENS_2000DPS;
 	GyroBiasZ = mean_lsb[2] / MPU6050_GYRO_SENS_2000DPS;
 
-	/* 合法性检查：真静止的零偏不可能超过 1°/s。超了说明器件或安装有问题，
-	 * 与其带着错误的零偏跑，不如清零并告警 */
-	if (fabsf(GyroBiasX) > 1.0f || fabsf(GyroBiasY) > 1.0f || fabsf(GyroBiasZ) > 1.0f) {
-		ESP_LOGW(TAG, "零偏超出合理范围（%.2f, %.2f, %.2f °/s），已清零，"
-			      "请检查安装与振动",
+	/* 合法性检查分两档。
+	 * MPU6050 datasheet 的零偏初始容差是 ±20°/s（25℃），廉价模块实测 2~5°/s
+	 * 非常常见。原来卡 1°/s 太严：一旦超限就清零，等于把"可测的零偏"换成 0，
+	 * 结果 |w| 一直显示 3~4°/s、yaw 每秒漂 0.6°（37°/min）—— 比带着偏差跑还糟。
+	 *
+	 * 所以：>20°/s 判器件异常（清零），1~20°/s 只告警但仍按实测值补偿。
+	 * "减掉一个真实的偏置"永远优于"不减"。 */
+	if (fabsf(GyroBiasX) > 20.0f || fabsf(GyroBiasY) > 20.0f ||
+	    fabsf(GyroBiasZ) > 20.0f) {
+		ESP_LOGE(TAG, "零偏超出 datasheet 容差（%.2f, %.2f, %.2f °/s），"
+			      "疑似器件损坏，已清零",
 			 GyroBiasX, GyroBiasY, GyroBiasZ);
 		GyroBiasX = GyroBiasY = GyroBiasZ = 0.0f;
 		return;
+	}
+	if (fabsf(GyroBiasX) > 1.0f || fabsf(GyroBiasY) > 1.0f ||
+	    fabsf(GyroBiasZ) > 1.0f) {
+		ESP_LOGW(TAG, "零偏偏大（%.2f, %.2f, %.2f °/s，模块个体差异），"
+			      "已按实测值补偿", GyroBiasX, GyroBiasY, GyroBiasZ);
 	}
 
 	GyroCalibrated = 1;
@@ -303,13 +335,48 @@ esp_err_t IMU_GetData(float *pitch, float *roll, float *yaw, float dt)
 		return err;	/* 读失败不动姿态：拿脏数据凑合比不更新更糟 */
 	}
 
-	err = QMC5883_GetData(&HX, &HY, &HZ);
-	if (err == ESP_OK) {
-		MagStatus = 0;
-	} else if (err == ESP_ERR_INVALID_RESPONSE) {
-		MagStatus = 2;	/* OVL：量程溢出，数据已削顶 */
+	/* 读成功但六轴全 0 = 芯片在休眠 / 被写保护。
+	 * 真实传感器一定有 LSB 级噪声，六轴同时精确为 0 物理上不可能。
+	 * 没有这一条，"通信正常但没有数据"永远不会触发恢复阶梯 ——
+	 * 设备会安静地报告 |a|=0，跌倒永远检不出来，也不报任何故障。 */
+	if (AX == 0 && AY == 0 && AZ == 0 && GX == 0 && GY == 0 && GZ == 0) {
+		return ESP_ERR_INVALID_STATE;
+	}
+
+	/* ---- 1b. 磁力计：不在线时每 1s 探一次，插上自动恢复 ---- */
+	bool need_read = MagPresent;
+	if (!MagPresent) {
+		if (++MagRetryCount >= MAG_RETRY_FRAMES) {
+			MagRetryCount = 0;
+			if (QMC5883_Init() == ESP_OK) {
+				MagPresent = true;
+				MagBaseCount = 0;	/* 重新建立磁场模值基准 */
+				MagNormSum = 0.0f;
+				need_read = true;
+				ESP_LOGI(TAG, "QMC5883L 上线，航向恢复");
+			}
+		}
+	}
+
+	if (need_read) {
+		err = QMC5883_GetData(&HX, &HY, &HZ);
+		if (err == ESP_OK) {
+			MagStatus = 0;
+			MagFailRun = 0;
+		} else if (err == ESP_ERR_INVALID_RESPONSE) {
+			MagStatus = 2;	/* OVL：量程溢出，数据已削顶 */
+		} else {
+			MagStatus = 1;	/* 总线读失败 */
+			if (++MagFailRun >= MAG_RETRY_FRAMES) {
+				MagFailRun = 0;
+				MagPresent = false;
+				ESP_LOGW(TAG, "磁力计连续 %d 帧无响应，暂停轮询，改为每 1s 重试",
+					 MAG_RETRY_FRAMES);
+			}
+		}
 	} else {
-		MagStatus = 1;	/* 总线读失败 */
+		MagStatus = 3;		/* 3 = 器件不在线，不是总线故障 */
+		HX = HY = HZ = 0;	/* 航向宁可冻结，也别用上次的旧值 */
 	}
 
 	/* ---- 2. 单位换算 ---- */
@@ -425,7 +492,16 @@ static esp_err_t sensors_reinit(void)
 	if (err != ESP_OK) {
 		return err;
 	}
-	return QMC5883_Init();
+
+	/* 磁力计缺席不能算 L2 失败 —— 否则 IMU 明明已经恢复，err_run 依然
+	 * 不清零，阶梯会一直卡在 L3 反复重初始化。没接磁力计时最容易踩这个死循环。 */
+	MagPresent = (QMC5883_Init() == ESP_OK);
+	MagRetryCount = 0;
+	MagFailRun = 0;
+	if (!MagPresent) {
+		ESP_LOGW(TAG, "磁力计仍不在线，仅 IMU 恢复");
+	}
+	return ESP_OK;
 }
 
 /*
@@ -447,11 +523,12 @@ static void recover_step(uint32_t *err_run)
 
 	if (*err_run == ERR_L1_FRAMES) {
 		s_stats.l1++;
-		ESP_LOGW(TAG, "IMU 连续失败 %u 帧 → L1 复位总线并探测", (unsigned)*err_run);
-		if (I2C_Recover() == ESP_OK && Mpu6050_GetID() == MPU6050_ID_VALUE) {
-			ESP_LOGI(TAG, "L1 恢复成功（累计 %u 次）", (unsigned)s_stats.l1);
-			*err_run = 0;
-		}
+		ESP_LOGW(TAG, "IMU 连续失败 %u 帧 → L1 复位总线", (unsigned)*err_run);
+		(void)I2C_Recover();
+		/* 这一级**不**清零 err_run。L1 只是复位总线，它无法证明数据已经好了；
+		 * 一旦在这里清零，计数永远停在 3，永远升不到 L2 重初始化 ——
+		 * 而"会 ACK 但数据全 0"这种故障恰恰只有 L2 才能救。
+		 * 真正的清零交给主循环：哪一帧读成功，那里会把 err_run 归零。 */
 		return;
 	}
 
@@ -501,11 +578,12 @@ static void log_summary(float pitch, float roll, float yaw, float acc_norm,
 {
 	ESP_LOGI(TAG, "seq=%u |a|=%.3fg |w|=%.2f°/s |m|=%.1fµT | "
 		      "pitch=%.1f° roll=%.1f° yaw=%.1f° | 周期=%.1fms "
-		      "imu_err=%u mag_err=%u ovl=%u 丢拍=%u L1=%u L2=%u",
+		      "imu_err=%u mag_err=%u ovl=%u 丢拍=%u L1=%u L2=%u%s",
 		 (unsigned)s_stats.frames, acc_norm, gyro_norm, mag_norm,
 		 pitch, roll, yaw, s_stats.last_dt_ms, (unsigned)s_stats.imu_err,
 		 (unsigned)s_stats.mag_err, (unsigned)s_stats.mag_ovl,
-		 (unsigned)s_stats.drops, (unsigned)s_stats.l1, (unsigned)s_stats.l2);
+		 (unsigned)s_stats.drops, (unsigned)s_stats.l1, (unsigned)s_stats.l2,
+		 MagPresent ? "" : " [磁力计未接]");
 }
 
 void sensor_task(void *pvParameter)
@@ -604,11 +682,26 @@ void sensor_task(void *pvParameter)
 
 void app_main(void)
 {
+	/* 0. 电源自锁必须是第一件事：K1 松手后主开关栅极只靠 C18(22µF) 撑 2.2s，
+	 *    I2C/传感器/校准加起来几百毫秒，晚一步就是"上电→掉电→重启"死循环，
+	 *    而且串口都抓不到（掉电太快）。
+	 *
+	 *    注意：现在靠 USB 供电完全看不出这一行有没有生效 —— USB 的 5V 直接把
+	 *    输出轨拉起来了。自锁必须**拔掉 USB、只用电池**才能验证。 */
+	if (pwr_init() != ESP_OK) {
+		ESP_LOGE(TAG, "电源自锁接管失败：电池供电下 2.2s 后会掉电");
+	}
+
 	esp_log_level_set("*", ESP_LOG_INFO);
+	/* i2c.master 的 NACK 是逐事务打印的（每次 3 行）。磁力计没接时
+	 * 50Hz × 3 行 = 每秒 150 行，串口被刷满，真正有用的信息全被冲走。
+	 * 总线健康度由我们自己的 imu_err / L1 / L2 计数器表达就够了。 */
+	esp_log_level_set("i2c.master", ESP_LOG_NONE);
 	memset(&s_stats, 0, sizeof(s_stats));
 
-	ESP_LOGI(TAG, "GW-1 守望者启动 | I2C SDA=IO8 SCL=IO9 400kHz | 采集 50Hz");
+	ESP_LOGI(TAG, "GW-1 守望者启动 | I2C SDA=IO41 SCL=IO42 400kHz | 采集 50Hz");
 
+	
 	/* 顺序不能乱：总线 → 两颗传感器 → 校准 → 起任务。
 	 * 校准必须在任务启动前做，否则会和 50Hz 循环抢总线。 */
 	esp_err_t err = i2c_Init_Final();
@@ -625,8 +718,24 @@ void app_main(void)
 		ESP_LOGE(TAG, "MPU6050 初始化失败，交由恢复阶梯处理");
 	}
 
-	if (QMC5883_Init() != ESP_OK) {
-		ESP_LOGE(TAG, "QMC5883L 初始化失败，航向功能不可用");
+	/* 自检：把 who_am_i 与 PWR_MGMT_1 打出来。
+	 * 这两个数能把"没接线 / 停在休眠 / 型号不对"三种情况一次分开 ——
+	 * bit6(SLEEP)=1 表示芯片没醒，数据必然恒为 0，别再去算法里找原因。 */
+	{
+		uint8_t who = 0, pwr1 = 0;
+		if (Mpu6050_Read(MPU6050_WHO_AM_I, &who, 1) == ESP_OK &&
+		    Mpu6050_Read(MPU6050_PWR_MGMT_1, &pwr1, 1) == ESP_OK) {
+			ESP_LOGI(TAG, "MPU 自检: who_am_i=0x%02X PWR_MGMT_1=0x%02X（SLEEP=%d）",
+				 who, pwr1, (pwr1 >> 6) & 1);
+		} else {
+			ESP_LOGE(TAG, "MPU 自检读寄存器失败");
+		}
+	}
+
+	MagPresent = (QMC5883_Init() == ESP_OK);
+	if (!MagPresent) {
+		ESP_LOGW(TAG, "QMC5883L 未接或未响应：本次不上报航向，"
+			      "运行时每 1s 重试一次（插上自动恢复）");
 	} else {
 		const uint8_t id = QMC5883_GetID();
 		if (id != 0xFF) {

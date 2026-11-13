@@ -167,15 +167,36 @@ esp_err_t Mpu6050_Init(void)
                 ESP_LOGE(TAG, "软复位失败: %s", esp_err_to_name(err));
                 return err;
         }
-        vTaskDelay(pdMS_TO_TICKS(100));
+        /* 复位后必须等：datasheet 写 100ms，但克隆板实测更慢，给 150ms 换一次成功 */
+        vTaskDelay(pdMS_TO_TICKS(150));
 
-        /* 2. 先确认器件在线，再动配置。
-         *    不在线时写一堆配置只会得到一堆 NACK，日志还看不出根因。 */
-        const uint8_t id = Mpu6050_GetID();
-        if (id != MPU6050_ID_VALUE) {
-                ESP_LOGE(TAG, "MPU6050 不在线: who_am_i=0x%02X（期望 0x%02X）", id,
-                         MPU6050_ID_VALUE);
+        /* 2. who_am_i：最多试 3 次，且**不在这里中止**。
+         *    复位刚结束的几十毫秒里从机经常不应答；而且市面上大量 GY-521
+         *    实际贴的是 MPU6500(0x70) / MPU9250(0x71) / MPU9255(0x73) /
+         *    国产替代(0x98)，它们的 who_am_i 都不是 0x68，但 0x3B~0x48 的
+         *    加速度/陀螺寄存器布局与 MPU6050 完全一致，本工程的配置寄存器也兼容。
+         *
+         *    原版在这里 return 的后果非常隐蔽：芯片停留在复位默认态
+         *    （PWR_MGMT_1 = 0x40，bit6 SLEEP = 1），数据寄存器永远输出 0，
+         *    但 I2C 每次事务照样 ACK —— 上层看到的是 imu_err=0 而 |a|=0.000g，
+         *    校准会一直"等待静止超时"，比直接 NACK 难查十倍。 */
+        uint8_t id = 0;
+        for (int i = 0; i < 3; i++) {
+                id = Mpu6050_GetID();
+                if (id != 0) {
+                        break;
+                }
+                ESP_LOGW(TAG, "who_am_i 第 %d 次读失败，重试", i + 1);
+                vTaskDelay(pdMS_TO_TICKS(50));
+        }
+
+        if (id == 0) {
+                ESP_LOGE(TAG, "MPU6050 无任何应答，检查 SDA/SCL/供电/AD0 电平");
                 return ESP_ERR_NOT_FOUND;
+        }
+        if (id != MPU6050_ID_VALUE) {
+                ESP_LOGW(TAG, "who_am_i=0x%02X（非 0x68），按兼容布局继续（MPU6500/9250 等）",
+                         id);
         }
 
         /* 3. 器件配置：每一步都检查，原版 void 写函数等于把错误全吞了 */
@@ -210,7 +231,22 @@ esp_err_t Mpu6050_Init(void)
 
         vTaskDelay(pdMS_TO_TICKS(50));
 
-        ESP_LOGI(TAG, "初始化完成: acc ±8g / gyro ±2000dps / 50Hz / DLPF 44Hz");
+        /* 4. 回读验证：写完不算数，读到才算数。
+         *    山寨器件会"接受"写入却忽略内容，只看返回值判断会一路绿灯跑到量产。 */
+        uint8_t pwr1 = 0;
+        err = Mpu6050_Read(MPU6050_PWR_MGMT_1, &pwr1, 1);
+        if (err != ESP_OK) {
+                ESP_LOGE(TAG, "回读 PWR_MGMT_1 失败: %s", esp_err_to_name(err));
+                return err;
+        }
+        if (pwr1 & 0x40) {                      /* bit6 = SLEEP */
+                ESP_LOGE(TAG, "唤醒失败: PWR_MGMT_1 回读 0x%02X 仍是 SLEEP，"
+                              "数据将恒为 0（器件可能被写保护或非原厂）", pwr1);
+                return ESP_ERR_INVALID_STATE;
+        }
+
+        ESP_LOGI(TAG, "初始化完成: id=0x%02X PWR_MGMT_1=0x%02X | acc ±8g / gyro ±2000dps "
+                      "/ 50Hz / DLPF 44Hz", id, pwr1);
         return ESP_OK;
 }
 
