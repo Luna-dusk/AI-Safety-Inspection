@@ -1,11 +1,3 @@
-//
-// Created by l on 2026/11/12.
-//
-// 移植自 mzx 分支 main/PWR.cpp（电源自锁）。
-// 与本工程的差异：引脚宏移到 PWR.h（约定：引脚常量放头文件）；
-// gpio_config_t 用逐个赋值而不是 C++ 指定初始化器（不依赖 C++20 的 -std）。
-//
-
 #include "PWR.h"
 
 #include <stdint.h>
