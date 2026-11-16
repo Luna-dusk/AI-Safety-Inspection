@@ -49,11 +49,8 @@ set(requires
                 mbedtls
                 esp-sr
                 esp_websocket_client  # v2 长连接传输（附录 B，AI_CHAT/Transport）
-                # TODO(LCD): 以下两项等 LCD/ 目录拷过来、并在 main/idf_component.yml
-                # 加一行 `lvgl/lvgl: ~8.3.0`（与源工程 ai_client 一致）之后再解开。
-                # 现在 BSP 里既没有 LCD 源码也没有 lvgl 依赖，留着会直接让 CMake 解析失败。
-                # esp_lcd
-                # lvgl__lvgl
+                esp_lcd               # ST7789 SPI 面板驱动（LCD/lcd_ui.c）
+                lvgl__lvgl            # LVGL 8.3（main/idf_component.yml 里 ~8.3.0）
                 )
 
 # 配网页 portal.html 内嵌进固件（wifi_provision.c 引用 _binary_portal_html_*）

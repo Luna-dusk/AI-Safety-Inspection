@@ -57,19 +57,25 @@
 
 | 名称 | Hex | 用途 |
 | --- | --- | --- |
-| `BG` | `#0B1116` | 屏幕底色 |
-| `SURFACE` | `#151D24` | 卡片 |
-| `LINE` | `#2B3842` | 卡片描边（1 px） |
-| `TEXT` | `#F2F7FA` | 主文字 |
-| `MUTED` | `#A8B9C4` | 次文字（已从 #8FA2AE 提亮一档，老年户外对比度） |
-| `ACCENT` | `#3DDC97` | 正常/在线/已送达（唯一的「安心色」） |
-| `AMBER` | `#FFB020` | 需要确认、降级、进行中 |
-| `RED` | `#FF5A5F` | 只用于呼救与告警 |
-| `RED_BG` | `#1A0D10` / 卡 `#2A1216` | 告警屏底色 |
-| `OK_BG` | `#16302A` | PTT 按钮底 |
-| `DISABLED_BG` | `#141B20` / 描边 `#38444D` | 对端离线时的 PTT |
+| `BG` | `#000000` | 屏幕底色（OLED 纯黑，watchOS 语义） |
+| `BAR` | `#000000` | 状态栏 / 底部导航，与屏底同色，靠分割线 `#38383A` 分界 |
+| `SURFACE` | `#1C1C1E` | 卡片（secondarySystemGroupedBackground） |
+| `SURFACE2` | `#2C2C2E` | 次级卡片 |
+| `LINE` | `#2C2C2E` | 卡片描边（1 px，贴近卡面色，视觉上接近无边框） |
+| `TEXT` | `#FFFFFF` | 主文字（label） |
+| `MUTED` | `#98989F` | 次文字（secondaryLabel，老年户外对比度） |
+| `DIM` | `#636366` | 三级文字 / 未激活图标（tertiaryLabel） |
+| `ACCENT` | `#30D158` | 正常/在线/已送达（唯一的「安心色」，systemGreen Dark） |
+| `AMBER` | `#FF9F0A` | 需要确认、降级、进行中（systemOrange Dark） |
+| `RED` | `#FF453A` | 只用于呼救与告警（systemRed Dark） |
+| `CYAN` | `#64D2FF` | 守护徽记内环：对端在线（systemCyan Dark） |
+| `RED_BG` | `#140507` / 卡 `#2A0E0C` | 告警屏底色 |
+| `OK_BG` | `#0F2A18` | PTT 按钮底 |
+| `DISABLED_BG` | `#1C1C1E` / 描边 `#3A3A3C` | 对端离线时的 PTT |
 
-暗色 + 高对比：夜间跌倒场景下不刺眼，绿色表示「一切正常」在暗底上最亮。红/琥珀/绿三色语义严格分离，**不用颜色表达装饰**。
+> 2026-11-15 起配色统一到 Apple Dark 系统色（watchOS 审美改版）。上一版是深蓝黑底 + 薄荷绿，对照表见 `.oil-ui/ui-review/REVIEW.md` 第四轮。改色只需动 `components/BSP/LCD/ui_theme.h`，屏文件里没有字面量色值。
+
+暗色 + 高对比：夜间跌倒场景下不刺眼，绿色表示「一切正常」在纯黑底上最亮。红/琥珀/绿三色语义严格分离，**不用颜色表达装饰**。
 
 ### 字号（只有 4 档，中文不再做粗体）
 

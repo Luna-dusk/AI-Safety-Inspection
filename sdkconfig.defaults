@@ -18,3 +18,25 @@ CONFIG_SPIRAM_TYPE_ESPPSRAM64=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# ── LVGL（ST7789 SPI 屏，components/BSP/LCD/）────────────────────────
+# ST7789 按字节流收 RGB565，LVGL 内存里默认小端，必须编译期换字节序，
+# 否则颜色像负片（LCD/README.md 4.3 / 9.⑤）
+CONFIG_LV_COLOR_16_SWAP=y
+# 图标走 LVGL 内置 Montserrat 的符号区（LV_SYMBOL_*），只开用到的两档，
+# 省掉一套 24×24 PNG 资源（ui/DESIGN.md:126 走法②）
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+
+# 栈溢出硬件观察点（调试期）：任何任务栈底 32B 被踩就立刻 panic 并打印任务名，
+# 比"寄存器莫名变 NULL / 看门狗复位循环"好查得多。定位完可以关掉省一个 watchpoint。
+CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
+
+# LVGL 内存池放 PSRAM（不要那 32KB 静态 .bss，内部 RAM 太紧）
+# 分配函数在 components/BSP/LCD/lv_mem_psram.h，由根 CMakeLists.txt 的
+# add_compile_definitions() 注入成 LV_MEM_CUSTOM_ALLOC/FREE/REALLOC。
+CONFIG_LV_MEM_CUSTOM=y
+CONFIG_LV_MEM_CUSTOM_INCLUDE="lv_mem_psram.h"
+
+# 全量中文字库（16px，2.7MB，>10k 字形）必须开，否则生成物里的 #error 会中断构建
+CONFIG_LV_FONT_FMT_TXT_LARGE=y

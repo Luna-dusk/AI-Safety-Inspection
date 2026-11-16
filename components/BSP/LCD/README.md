@@ -2,11 +2,16 @@
 
 > 配套文档：`ui/DESIGN.md`（8 屏视觉规范 + LVGL 一一对应表）、`ui/prototype/index.html`（交互原型）
 > 屏幕硬件：ST7789 SPI，240×320，RGB565；触摸芯片型号待定（第 6 节留接口）。
-> 本期范围：**移植层 + 主屏第一卡**（= `ui/DESIGN.md:142-147` 移植顺序的第 1 步）。
+> 本期范围：**移植层 + 主屏**（= `ui/DESIGN.md:142-147` 移植顺序的第 1 步）。
 >
-> **实施状态（2026-11-07）**：本文是**写代码之前的设计讲解**，`lcd_ui.c` 仍是占位实现。
-> 文中所有 file:line 引用以当前代码为准；esp_lcd 与 LVGL 的关键行为均已对照本机
-> IDF 5.4 源码和 LVGL 8.3 源码核实（出处见文末附录），不是凭印象写的。
+> **实施状态（2026-11-14）：已上板实现**。
+> `lcd_ui.c` 已换成真实现（SPI2 + esp_lcd ST7789 + LVGL 8.3，引脚见 3.0），
+> 并新增 `ui_theme.*` / `ui_widgets.*` / `screen_home.*` / `ui_font_cn_{12,16,20}.c`，
+> 主屏版面按 `ui/prototype/index.html` 的 `s-home` 逐坐标移植（含状态栏、
+> 守护大卡、事件/AI 双卡、呼救红卡、底部导航）。
+> 本文其余章节保留为**设计讲解**：改动移植层前先读，`file:line` 引用仍以
+> 当前代码为准；esp_lcd 与 LVGL 的关键行为均已对照本机 IDF 5.4 / LVGL 8.3
+> 源码核实（出处见文末附录）。
 
 ---
 
@@ -15,29 +20,29 @@
 **对上的接口已经存在，不用写；对下的接口要写，而且只有三个点。**
 
 这个项目的 UI 是三层结构：
-
+    
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ 业务层：AFE_SR / CHAT / MultiNet                              │
-│   只调 lcd_ui_set_status() / lcd_ui_set_emotion()            │
-│   一个 #include "lvgl.h" 都没有 —— 业务层不知道 LVGL 存在       │
+│ 业务层：AFE_SR / CHAT / MultiNet                               │
+│   只调 lcd_ui_set_status() / lcd_ui_set_emotion()             │
+│   一个 #include "lvgl.h" 都没有 —— 业务层不知道 LVGL 存在         
 ├──────────────────────────────────────────────────────────────┤
-│ 接口层：lcd_ui.h —— 已经写好，签名别动                        │
-│   4 个函数 + 2 个枚举（lcd_ui.h:22-36, 39-49）                │
+│ 接口层：lcd_ui.h —— 已经写好，签名别动                           │
+│   4 个函数 + 2 个枚举（lcd_ui.h:22-36, 39-49）                 │
 ├──────────────────────────────────────────────────────────────┤
-│ 实现层：LCD/ 目录内部（本文要写的全部内容）                     │
-│   LVGL（界面怎么画）+ 移植层（LVGL 怎么到屏幕）                │
-│   + esp_lcd（SPI 时序/命令）→ ST7789 硬件                    │
+│ 实现层：LCD/ 目录内部（本文要写的全部内容）                         │
+│   LVGL（界面怎么画）+ 移植层（LVGL 怎么到屏幕）                    │
+│   + esp_lcd（SPI 时序/命令）→ ST7789 硬件                       │
 └──────────────────────────────────────────────────────────────┘
 ```
 
 "移植层"听起来玄，其实 LVGL 把它收敛成了**你必须提供的三个接口点**：
 
-| # | 接口点 | 方向 | 是什么 |
-| --- | --- | --- | --- |
-| 1 | `flush_cb` | LVGL → 屏幕 | LVGL 把一块像素算好放进 buffer 后，调**你写的**这个函数："这块请送出去"。整个移植层唯一必须写对的函数 |
-| 2 | tick | 心跳 | LVGL 自己不计时，需要你定期告诉它"过了 1ms"（`lv_tick_inc`） |
-| 3 | `lv_timer_handler()` 循环 | 泵 | LVGL 是纯库不是任务，必须有人反复调它它才干活——这个"有人"就是 `lcd_ui_task` |
+| #   | 接口点                     | 方向        | 是什么                                                          |
+| --- | ----------------------- | --------- | ------------------------------------------------------------ |
+| 1   | `flush_cb`              | LVGL → 屏幕 | LVGL 把一块像素算好放进 buffer 后，调**你写的**这个函数："这块请送出去"。整个移植层唯一必须写对的函数 |
+| 2   | tick                    | 心跳        | LVGL 自己不计时，需要你定期告诉它"过了 1ms"（`lv_tick_inc`）                   |
+| 3   | `lv_timer_handler()` 循环 | 泵         | LVGL 是纯库不是任务，必须有人反复调它它才干活——这个"有人"就是 `lcd_ui_task`            |
 
 除了这三点，剩下的（主题、卡片、字库、8 个屏）都是普通 LVGL 应用代码，不叫接口。
 
@@ -47,16 +52,20 @@ chat.c:135、341。等你把 stub 换成真实现，**这 9 处一行都不用�
 
 ---
 
-## 1. 现状盘点（2026-11-07）
+## 1. 现状盘点（2026-11-14）
 
 | 文件 | 状态 | 说明 |
 | --- | --- | --- |
-| `lcd_ui.h` | ✅ 接口已定 | **别动**。两个枚举 + 4 个函数；头文件注释里还留着移植清单（lcd_ui.h:12-16） |
-| `lcd_ui.c` | ⚠️ 占位实现 | init 只打日志（lcd_ui.c:41-44），task 空转（lcd_ui.c:53-59）；本文 3 节逐函数替换其**内部** |
-| `main/main.c` | ❌ 没接线 | app_main（main.c:32-67）没调 `lcd_ui_init()`，没建 `lcd_ui_task`（见 3.6） |
-| `main/idf_component.yml` | ❌ 无 lvgl | 17-19 行只有 openai / mdns / esp-sr（见 4.1） |
-| `components/BSP/CMakeLists.txt` | ❌ 注释着 | 44-48 行 `esp_lcd` / `lvgl__lvgl` 等解开（见 4.2） |
-| `sdkconfig.defaults` | ✅ 有利条件 | 8MB Octal PSRAM 已开（`SPIRAM_USE_MALLOC`），将来大 buffer 有地方放 |
+| `lcd_ui.h` | ✅ 接口已定 | **别动签名**。两个枚举 + 4 个函数 |
+| `lcd_ui.c` | ✅ 实机实现 | SPI2 + esp_lcd ST7789 + LVGL 移植层（3.0 引脚 / 3.1-3.5 全部落地） |
+| `ui_theme.h/.c` | ✅ 新增 | 色值/字号/尺寸宏（DESIGN.md 第 3 节的代码化）+ basic 主题 |
+| `ui_widgets.h/.c` | ✅ 新增 | card / label / icon / 信号柱 / 电量图标 / 点击挂钩 |
+| `screen_home.h/.c` | ✅ 新增 | 主屏 · 守护（状态栏 + 4 个区块 + 底部导航） |
+| `ui_font_cn_{12,16,20}.c` | ✅ 新增 | lv_font_conv 子集（Noto Sans SC，4bpp，约 45+60+75 KB 源码） |
+| `main/main.c` | ✅ 已接线 | `lcd_ui_init()` + `xTaskCreate(lcd_ui_task, 8192, prio 8)`（ESP-NOW 之后） |
+| `main/idf_component.yml` | ✅ 已有 lvgl | `lvgl/lvgl: "~8.3.0"`（实际拉到 8.3.11） |
+| `components/BSP/CMakeLists.txt` | ✅ 已解开 | requires 里 `esp_lcd` / `lvgl__lvgl` |
+| `sdkconfig.defaults` | ✅ 已加 | `LV_COLOR_16_SWAP` + `LV_FONT_MONTSERRAT_16/20`（图标符号用） |
 
 ---
 
@@ -95,17 +104,21 @@ lcd_ui_set_status(LISTENING)
 ### 3.0 引脚宏（唯一要你自己查数的地方）
 
 ```c
-/* lcd_ui.c 顶部。对着你的屏排线丝印填，丝印名在括号里 */
-#define LCD_PIN_MOSI  (-1)  /* SDI / SDA */
-#define LCD_PIN_CLK   (-1)  /* SCL / SCK */
-#define LCD_PIN_CS    (-1)  /* CS  */
-#define LCD_PIN_DC    (-1)  /* DC / RS —— ST7789 必须有，命令/数据切换 */
-#define LCD_PIN_RST   (-1)  /* RES；有的模块板载 RC 复位电路，可填 -1 */
-#define LCD_PIN_BLK   (-1)  /* BLK / BL 背光 */
-#define LCD_SPI_HOST  SPI2_HOST
+/* lcd_ui.c 顶部。本板：排针 2.54mm 1×8P，H1.3~H1.8 */
+#define LCD_PIN_SCLK    GPIO_NUM_9    /* H1.3 SCL  —— 模块丝印叫 SCL，是 SPI 时钟不是 I2C */
+#define LCD_PIN_MOSI    GPIO_NUM_10   /* H1.4 SDA  —— SPI 数据（同样是模块厂的 SDA 叫法） */
+#define LCD_PIN_RST     GPIO_NUM_11   /* H1.5 RES */
+#define LCD_PIN_DC      GPIO_NUM_12   /* H1.6 DC  —— ST7789 必须有 */
+#define LCD_PIN_CS      GPIO_NUM_13   /* H1.7 CS */
+#define LCD_PIN_BLK     GPIO_NUM_14   /* H1.8 BLK 背光 */
+#define LCD_SPI_HOST    SPI2_HOST
 ```
 
-先填对 DC 和 CS，这俩错了屏幕完全没反应；RST/BLK 错了屏幕能收到命令但点不亮。
+> **SCL/SDA 不是 I2C**：ST7789 是 4 线 SPI，模块丝印习惯把 SCLK 写 SCL、MOSI 写 SDA。
+> 判据是本模块还有 DC 和 CS 两根（I2C 屏不会有），且引脚数是 6 根信号。
+>
+> 先填对 DC 和 CS，这俩错了屏幕完全没反应；RST/BLK 错了屏幕能收到命令但点不亮。
+> 引脚与现有外设无冲突（I2S=4/5/6/7/15/16、KEY=0/2、LED=1、PWR=18/40、IMU I2C=41/42）。
 
 ### 3.1 lcd_ui_init()：六步
 
@@ -310,8 +323,10 @@ void lcd_ui_task(void *arg)
   和 ai_chat 任务同规格（main.c:62）。
 - **优先级 8，不绑核**：低于 afe_feed(21)/afe_fetch(20)/ai_chat(12)。UI 掉一帧没人
   察觉，音频掉一帧就是爆音。优先级才是关键，绑不绑核无所谓。
-- **5ms 下限**：界面静止时 `lv_timer_handler` 可能返回 0（只有 tick 这种小活），
-  不设下限就变成纯忙等烧 CPU。
+- **5ms 下限 + 30ms 上限**：界面静止时 `lv_timer_handler` 可能返回 0（只有 tick
+  这种小活），不设下限就变成纯忙等烧 CPU；而**没有定时器就绪时它返回
+  `LV_NO_TIMER_READY = 0xFFFFFFFF`**，不设上限直接 `vTaskDelay` 会睡 71 分钟
+  ——屏幕永久停在第一帧（HANDOFF 坑 33，真机踩过）。
 
 ### 3.5 set_status / set_emotion：跨线程交接的实现
 
@@ -361,24 +376,37 @@ static void ui_consume_state(void)
 
 stub 版 `lcd_ui_set_status` 里的日志可以保留（换成 LOGD），初调有用。
 
-### 3.6 app_main 接线（main.c 现在缺这两行）
+### 3.6 app_main 接线（放在 PCM 队列之后、音频链路之前）
 
 ```c
 #include "lcd_ui.h"          /* main.c 头部 */
 
-/* app_main 里，建议放在第 3 步（ESP-NOW）之后、语音链路（第 4 步）之前：
- * 屏幕早一秒亮，用户早一秒有"开机了"的实感 */
+/* app_main 里：pwr_init → PCM 队列 → **屏幕** → I2S/WiFi/ESP-NOW/AFE/AI_CHAT/跌倒 */
 lcd_ui_init();
 if (xTaskCreate(lcd_ui_task, "lcd_ui", 8192, NULL, 8, NULL) != pdPASS) {
     ESP_LOGE(TAG, "create lcd_ui task failed");
 }
 ```
 
-顺序**不是硬约束**是这个设计的又一个好处：就算 `lcd_ui_init()` 还没跑，
-AFE 先调了 `lcd_ui_set_status()` 也无害——影子变量只写不读，init 完成后
-第一帧自动带上最新状态。
+**位置由内部 RAM 决定，不是由"开机好看"决定**（2026-11-14 两轮真机踩坑）：
 
----
+| 尝试 | 结果 |
+| --- | --- |
+| 放在语音链路**之前**（第一版） | 抢走 33KB PCM 队列要的连续内部 RAM → `xQueueCreate` 返回 NULL → `ai_chat_task` 拿到 NULL 句柄 → 第一个 `xQueueReceive` 断言 → 看门狗复位循环 |
+| 放在 app_main **最后**（第二版） | 队列没事了，但 WiFi/esp-sr/AFE 把内部堆切碎（实测最大连续块 3.8KB）→ draw buffer 分配失败 → 屏幕全黑；而且 AI_CHAT(prio 12) 一起来，app_main(prio 1) 就抢不到 CPU，屏幕要等 4.5 秒 |
+
+**定案**：三个大块全部搬进 PSRAM（PCM 队列 33KB、WS 下行管道 32KB、LVGL 内存池
+32KB），屏幕自己只要 ~14KB（5.7KB draw buffer + 8KB 任务栈），
+所以在**队列之后立刻上屏**——趁内部堆还完整时抢，300ms 内亮屏。
+见 4.4 与 HANDOFF「坑 31」。
+
+这里的 draw buffer 大小是**递减试探**的（12 → 6 → 3 行）：
+块大小几乎不影响帧速（整屏字节数一样，只是多切几刀），
+拿不到就退，宁可刷慢也不能黑屏。
+
+顺序**不是**语义上的硬约束：就算 `lcd_ui_init()` 还没跑，AFE 先调
+`lcd_ui_set_status()` 也无害——影子变量只写不读，init 完成后第一帧
+自动带上最新状态。
 
 ## 4. 依赖与配置（三处，lcd_ui.h:12-16 注释的展开）
 
@@ -423,26 +451,48 @@ CONFIG_LV_COLOR_16_SWAP=y
 原样直发，一个字节都不用 CPU 搬。
 
 改动后 `idf.py reconfigure`（拉取 lvgl 组件）→ `idf.py build`。
-LVGL 其余配置走 menuconfig（`CONFIG_LV_*`），本期默认值基本都对，
-只需要知道两个：`LV_COLOR_DEPTH` 默认 16（别动）；`LV_MEM_SIZE` 默认 32KB
-（LVGL 内部堆，本期一张卡够用，8 屏全上时不够再提到 64KB）。
+LVGL 其余配置走 menuconfig（`CONFIG_LV_*`），`LV_COLOR_DEPTH` 默认 16（别动）。
+
+### 4.4 LVGL 内存池必须放 PSRAM（真机内存实测后追加）
+
+```ini
+CONFIG_LV_MEM_CUSTOM=y
+CONFIG_LV_MEM_CUSTOM_INCLUDE="lv_mem_psram.h"
+```
+
+LVGL 默认拿一块 `LV_MEM_SIZE`（32KB）的**静态数组**当内存池，直接进 `.bss`
+—— 等于开机就从内部 RAM 挖走 32KB。这块板子内部 RAM 本来就只够
+（WiFi/lwIP/esp-sr/音频队列 33KB/TLS 都在抢），上屏后实测只剩 12KB、
+最大连续块 3.8KB，什么都分配不出来。
+
+改成 custom allocator 指向 PSRAM 后（`components/BSP/LCD/lv_mem_psram.h`
+里的 `lv_mem_psram_alloc`），`.bss` 从 75,160 降到 42,464，DIRAM 余量
+从 138.6KB 升到 171.2KB。三个宏（ALLOC/FREE/REALLOC）在根
+`CMakeLists.txt` 里用 `add_compile_definitions()` 注入 —— 必须在 `project()`
+之前，否则只对 BSP 生效、对 lvgl__lvgl 组件不生效。
+
+>> **draw buffer 不走这条**：它要 SPI DMA 直接读，必须留在内部 RAM。
+>> `lv_mem_psram_alloc` 带内部 RAM 回退，所以就算 PSRAM 不可用也只是慢，不会挂。
 
 ---
 
 ## 5. 主屏第一卡（DESIGN.md 移植顺序第 1 步）
 
-### 5.0 文件结构（本期只建这四个，别一次建满 8 屏）
+### 5.0 文件结构
 
 ```
 components/BSP/LCD/
-  lcd_ui.h / lcd_ui.c        移植层（3 节）+ 接口层（不动）
-  ui_theme.h / ui_theme.c    色值宏 + 字体指针
-  screen_home.h / screen_home.c  主屏（本期：一张守护状态卡）
-  lv_font_cn_16.c            字库生成物（5.3）
+  lcd_ui.h / lcd_ui.c            移植层（3 节）+ 接口层（签名不动）
+  ui_theme.h / ui_theme.c        色值宏 + 字号指针 + basic 主题
+  ui_widgets.h / ui_widgets.c    card / label / icon / 信号柱 / 电量 / 点击挂钩
+  screen_home.h / screen_home.c  主屏·守护（状态栏 + 4 区块 + 底部导航）
+  lv_mem_psram.h                 LVGL 内存池后端（PSRAM 优先，内部 RAM 回退）
+  ui_font_cn_12.c / _16.c / _20.c  字库生成物（5.3）
 ```
 
-`ui/DESIGN.md:131-138` 的完整分层（ui_nav / ui_widgets / screen_*×8）是 8 屏
-全上时的终态。第一卡阶段 **ui_nav 还不存在**——没有第二个屏，谈不上跳转。
+`ui/DESIGN.md:131-138` 的完整分层里 `ui_nav` / `ui_widgets` / `screen_*×8` 是 8 屏
+全上时的终态。主屏阶段 **ui_nav 还不存在**——没有第二个屏，谈不上跳转；
+点击区的回调目前只打串口日志（`SCR_HOME: tap on 'xxx'`）。
 
 ### 5.1 ui_theme：把设计规范变成宏
 
@@ -452,14 +502,15 @@ components/BSP/LCD/
 /* ui_theme.h */
 #include "lvgl.h"
 
-#define COL_BG      lv_color_hex(0x0B1116)   /* 屏幕底色 */
-#define COL_SURFACE lv_color_hex(0x151D24)   /* 卡片 */
-#define COL_LINE    lv_color_hex(0x2B3842)   /* 卡片描边 1px */
-#define COL_TEXT    lv_color_hex(0xF2F7FA)   /* 主文字 */
-#define COL_MUTED   lv_color_hex(0xA8B9C4)   /* 次文字 */
-#define COL_ACCENT  lv_color_hex(0x3DDC97)   /* 安心绿：正常/在线/已送达 */
-#define COL_AMBER   lv_color_hex(0xFFB020)   /* 需要确认/进行中 */
-#define COL_RED     lv_color_hex(0xFF5A5F)   /* 只用于呼救与告警 */
+#define COL_BG      lv_color_hex(0x000000)   /* 屏底：OLED 纯黑 */
+#define COL_SURFACE lv_color_hex(0x1C1C1E)   /* 卡片 */
+#define COL_LINE    lv_color_hex(0x2C2C2E)   /* 卡片描边 1px（贴近卡面色） */
+#define COL_TEXT    lv_color_hex(0xFFFFFF)   /* 主文字 */
+#define COL_MUTED   lv_color_hex(0x98989F)   /* 次文字 */
+#define COL_ACCENT  lv_color_hex(0x30D158)   /* 安心绿：正常/在线/已送达 */
+#define COL_AMBER   lv_color_hex(0xFF9F0A)   /* 需要确认/进行中 */
+#define COL_RED     lv_color_hex(0xFF453A)   /* 只用于呼救与告警 */
+#define COL_CYAN    lv_color_hex(0x64D2FF)   /* 守护徽记内环：对端在线 */
 
 extern lv_font_t ui_font_cn_16;   /* lv_font_cn_16.c 里的生成物 */
 ```
@@ -575,27 +626,46 @@ void screen_home_set_emotion(lcd_emotion_t emo)
 `lv_obj_set_pos/size` 的参数，不用换算。我代码里的数字是起步示意，
 正式实现对着 `index.html` 的属性抄。
 
-### 5.3 中文字库：lv_font_conv 子集（一次性操作）
+### 5.3 中文字库（两个档位，别混用）
 
-**绝不能用全字库**：Noto Sans SC 全量 16px ≈ 1MB+，factory 分区装不下也浪费。
-只收这个 UI 用到的字（DESIGN.md:154 的做法）：
+| 字库 | 内容 | 体积 | 用在哪 |
+| --- | --- | --- | --- |
+| `ui_font_cn_12` / `ui_font_cn_20` | **UI 子集**：只收本屏固定文案用到的字 | 各几十 KB | 状态栏、卡片标题、导航 |
+| `ui_font_cn_common_16` | **常用字集**：GB2312 一级汉字 3755 + 标点 94 + ASCII/Latin-1/全角 | ~600KB 编译产物（3.3MB 源码） | 16px 正文、**对话气泡** |
+
+**为什么 16px 用常用字集而不是子集**：对话界面显示的是服务器返回的任意文字，
+子集方案漏一个字就是一个 □（本项目已经漏过"用"）。GB2312 一级字表按拼音排序、
+3755 字覆盖现代汉语约 99.7%。全量（CJK 基本区 20992 字）4bpp 要 2.7MB、
+生成物 18MB 源码，收益不值这个代价。
+
+**生成方式（可复现，别手改生成物）**：
 
 ```bash
-# 输入字体：NotoSansSC-Regular.otf（思源黑体同源，开源可商用）
-# ASCII 区间一起收：数字/百分号/省略号就不用再嵌 Montserrat
-npx lv_font_conv --bpp 4 --size 16 --font NotoSansSC-Regular.otf \
-  -r 0x20-0x7F \
-  --symbols "监护中已静默分钟聆听回复在线离线对讲紧急呼救设置事件应用商店" \
-  --format lvgl --lv-font-name ui_font_cn_16 -o lv_font_cn_16.c
+python3 tools/gen_font_common.py            # 默认字体 /tmp/NotoSansSC-Regular.otf
+# 从系统 .ttc 抽 .otf（Noto Sans CJK 的 index 2 = SC）：
+python -c "from fontTools.ttLib import TTCollection; \
+  TTCollection('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc') \
+  .fonts[2].save('/tmp/NotoSansSC-Regular.otf')"
 ```
 
-- `--symbols` 只收列出的字 → 生成物几十 KB。**加新界面文字要回来重新生成**，
-  忘了的现象是屏上出豆腐块 □□。
-- 生成的 `lv_font_cn_16.c` 拷进 LCD/ 目录即可——BSP 的 `SRC_DIRS` 会自动收编
-  （CMakeLists.txt:8 已注册 LCD 目录），不需要再改构建脚本。
-- `lv_font_conv` 环境：有 npm 就 `npx` 直接跑；不想装 node 用网页版
-  https://lvgl.io/tools/fontconverter 同参数。
-- 将来"监护中"上 20px：同一条命令 `--size 20` 再来一遍，生成 `ui_font_cn_20`。
+脚本内部就是 `lv_font_conv --bpp 4 --size 16 ... --no-compress`，见
+`tools/gen_font_common.py` 头注释；生成后会自动校验 `bitmap_format == 0`。
+
+**三个必须知道的点**：
+
+1. **`--no-compress` 不能省**（HANDOFF 坑 32）：lv_font_conv 默认输出 RLE 压缩位图，
+   而 LVGL 在 `LV_USE_FONT_COMPRESSED=0` 时对每个字形 `return NULL` —— 现象是
+   **图标都在、文字一个字都不显示，且没有任何日志**。`font_selfcheck()` 会报。
+2. **行高/基线要归一化**：这批字库里有极端字形把 `line_height` 撑到 31px、
+   `base_line` 撑到 9（子集版是 20/5）。字形是按基线定位的，所以
+   `ui_theme_init()` 复制一份到可写全局 `ui_font_cn_16` 并改回 (20,5)，
+   像素位置与子集版逐字一致。屏幕代码一律用 `ui_font_cn_16`。
+3. **`CONFIG_LV_FONT_FMT_TXT_LARGE=y`** 要开（生成物里带 `#error` 检查）。
+
+**加新文案 / 出现 □ 怎么办**：
+- UI 子集（12/20 档）：把新字加进 12/20 的 `--symbols` 重生成；
+- 16px 档用的是常用字集，一般不用动；真的缺生僻字时，
+  `ui_audit_text()` 会在串口打出 `U+XXXX`，按码点决定是否扩字集。
 
 ---
 
@@ -669,7 +739,7 @@ idf.py build
 ### ③ 字库 / 颜色 / 触摸三点核对（DESIGN.md:144 的验收原话）
 
 - 字库：卡上中文是文字不是 □□；
-- 颜色：环是 `#3DDC97` 的绿，卡片描边是 `#2B3842`；
+- 颜色：外环是 `#30D158` 的绿、内环是 `#64D2FF` 的青，卡片描边是 `#2C2C2E`（很淡，近乎无边框）；
 - 触摸：点卡片串口出 `home card clicked`（无触摸则走 BOOT 键路径）。
 
 ### ④ 接业务状态（临时注一行）
@@ -712,6 +782,7 @@ idf.py build
 | 10 | UI 任务优先级 ≥ ai_chat | 播放卡顿爆音 | prio 8 |
 | 11 | LVGL 全字库 | 1MB+ flash，分区装不下 | 5.3 子集 --symbols |
 | 12 | 加了新文字没重新生成字库 | 屏上豆腐块 □□ | 5.3 |
+| 12b | 字库用了默认的压缩位图，而 `LV_USE_FONT_COMPRESSED=0` | **文字整块消失，无任何日志**（图标正常） | 5.3 的 `--no-compress`；`font_selfcheck()` 会报 |
 | 13 | 业务任务里直接调 `lv_xxx()` 改控件 | 随机崩溃（LVGL 非线程安全） | 跨线程只写影子变量，lv_ 调用只出现在 lcd_ui 任务（3.5） |
 | 14 | 用锁去"修" s_dirty 竞态 | 白费功夫还引入死锁风险 | 3.5 竞态分析，顺序对了就无锁 |
 | 15 | 改 lcd_ui.h 已有签名 | 9 个调用点编译炸 | 8 节扩展规则 |
