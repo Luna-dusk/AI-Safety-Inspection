@@ -14,13 +14,8 @@
 #include "Mpu6050.h"
 #include "freertos/task.h"
 
-/* 为什么换掉 driver/i2c.h（legacy）：
- *   1. legacy 事务超时后硬件状态机停在坏状态，之后每次读都失败，永远；
- *      新驱动超时会在内部自动做 FSM 复位（i2c_master.c 里 s_i2c_hw_fsm_reset），下一帧还能用。
- *   2. 新驱动提供 i2c_master_bus_reset()，能处理"从机把 SDA 拉死"——这是总线恢复阶梯的 L1，
- *      legacy 完全没有对应 API。
- *   3. 顺带解决一个编译问题：legacy 的 i2c_config_t 要写 .master.clk_speed，
- *      而 C++ 不允许嵌套指定初始化器，原写法在 .cpp 里必定编不过。 */
+/* 用新 i2c_master 驱动而不是 legacy 的 driver/i2c.h：新驱动超时后会自动复位
+ * 硬件 FSM，并提供 i2c_master_bus_reset()（总线恢复阶梯的 L1）；legacy 两者都没有。 */
 
 #define I2C_SDA_GPIO 41
 #define I2C_SCL_GPIO 42
@@ -28,8 +23,7 @@
 /* 400kHz：100kHz 下两颗传感器 50Hz 就占掉约 13% 带宽，留给触摸的余量太少 */
 #define I2C_MASTER_FREQ_HZ 400000
 
-/* 事务超时 20ms ≈ 一个采样周期。卡死时宁可丢这一帧，也不能让 50Hz 节拍被拖垮
- * （legacy 原版用的是 1000ms，一次卡死直接丢 50 帧） */
+/* 事务超时 20ms ≈ 一个采样周期。卡死时宁可丢这一帧，也不能让 50Hz 节拍被拖垮 */
 #define I2C_TIMEOUT_MS 20
 
 #define MPU6050_ADDRESS 0x68
@@ -51,10 +45,8 @@ esp_err_t i2c_Init_Final(void)
                 return ESP_OK;
         }
 
-        /* 注意这里不用 `i2c_master_bus_config_t cfg{ .i2c_port = ... }`：
-         * C++ 的指定初始化器限制比 C 严，字段必须按声明顺序且不能嵌套，
-         * 写错一个就报 "either all initializer clauses should be designated"。
-         * 先零初始化再逐字段赋值，可读性和可移植性都更好。 */
+        /* 不用 `i2c_master_bus_config_t cfg{ .i2c_port = ... }`：C++ 的指定初始化器
+         * 字段必须按声明顺序且不能嵌套。先零初始化再逐字段赋值。 */
         i2c_master_bus_config_t bus_cfg = {};
         bus_cfg.i2c_port = I2C_NUM_0;
         bus_cfg.sda_io_num = (gpio_num_t)I2C_SDA_GPIO;
@@ -171,16 +163,10 @@ esp_err_t Mpu6050_Init(void)
         vTaskDelay(pdMS_TO_TICKS(150));
 
         /* 2. who_am_i：最多试 3 次，且**不在这里中止**。
-         *    复位刚结束的几十毫秒里从机经常不应答；而且市面上大量 GY-521
+         *    复位刚结束的几十毫秒里从机经常不应答；且市面上大量 GY-521
          *    实际贴的是 MPU6500(0x70) / MPU9250(0x71) / MPU9255(0x73) /
-         *    国产替代(0x98)，它们的 who_am_i 都不是 0x68，但 0x3B~0x48 的
-         *    加速度/陀螺寄存器布局与 MPU6050 完全一致，本工程的配置寄存器也兼容。
-         *
-         *    原版在这里 return 的后果非常隐蔽：芯片停留在复位默认态
-         *    （PWR_MGMT_1 = 0x40，bit6 SLEEP = 1），数据寄存器永远输出 0，
-         *    但 I2C 每次事务照样 ACK —— 上层看到的是 imu_err=0 而 |a|=0.000g，
-         *    校准会一直"等待静止超时"，比直接 NACK 难查十倍。
-         *    （mzx 分支 af1ff28 修复） */
+         *    国产替代(0x98)，其 who_am_i 都不是 0x68，但 0x3B~0x48 寄存器布局
+         *    与 MPU6050 一致（踩过的坑见 HANDOFF 坑 36）。 */
         uint8_t id = 0;
         for (int i = 0; i < 3; i++) {
                 id = Mpu6050_GetID();
@@ -200,7 +186,7 @@ esp_err_t Mpu6050_Init(void)
                          id);
         }
 
-        /* 3. 器件配置：每一步都检查，原版 void 写函数等于把错误全吞了 */
+        /* 3. 器件配置：每一步都检查返回码（写失败不能吞）*/
         /* 唤醒并选择 X 轴陀螺 PLL 作为时钟源（比内部 RC 振荡器稳定得多，
          * 内部 RC 的抖动会直接变成陀螺噪声） */
         if ((err = Mpu6050_Write(MPU6050_PWR_MGMT_1, MPU6050_PWR1_CLKSEL_PLL_X)) != ESP_OK) {
@@ -224,8 +210,7 @@ esp_err_t Mpu6050_Init(void)
         if ((err = Mpu6050_Write(MPU6050_GYRO_CONFIG, MPU6050_GYRO_FS_2000)) != ESP_OK) {
                 return err;
         }
-        /* 加速度满量程 ±8g（原版是 ±16g）：4096 LSB/g，2.5g 判据的噪声余量充足，
-         * 换成 8g 后小信号的量化误差直接减半 */
+        /* 加速度满量程 ±8g：4096 LSB/g，2.5g 判据的噪声余量充足，小信号量化误差也小 */
         if ((err = Mpu6050_Write(MPU6050_ACCEL_CONFIG, MPU6050_ACCEL_FS_8)) != ESP_OK) {
                 return err;
         }
@@ -233,8 +218,8 @@ esp_err_t Mpu6050_Init(void)
         vTaskDelay(pdMS_TO_TICKS(50));
 
         /* 4. 回读验证：写完不算数，读到才算数。
-         *    山寨器件会"接受"写入却忽略内容，只看返回值判断会一路绿灯跑到量产。
-         *    这一步专门兜住"停在 SLEEP、六轴恒 0"——就是 mzx 分支 af1ff28 修的那个坑。 */
+         *    山寨器件会"接受"写入却忽略内容，只看返回值会一路绿灯跑到量产；
+         *    这一步专门兜住"停在 SLEEP、六轴恒 0"（HANDOFF 坑 36）。 */
         uint8_t pwr1 = 0;
         err = Mpu6050_Read(MPU6050_PWR_MGMT_1, &pwr1, 1);
         if (err != ESP_OK) {

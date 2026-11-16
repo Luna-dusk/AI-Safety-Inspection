@@ -182,7 +182,7 @@ void wifi_init_sta(void *pvParameters)
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     /* 必须显式进 STA 模式：默认 NULL 模式下 esp_wifi_start 不拉起任何接口，
      * 有凭证直连路径的 esp_wifi_connect 会失败且没有 STA_START/重试事件，
-     * 设备会永远静默离线（2026-11-08 真机踩坑） */
+     * 设备会永远静默离线（HANDOFF 坑 22 同源）。 */
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 
     // Register before starting Wi-Fi so WIFI_EVENT_STA_START cannot be missed.

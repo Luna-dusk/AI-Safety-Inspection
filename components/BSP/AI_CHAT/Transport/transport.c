@@ -5,6 +5,7 @@
 #include "esp_http_client.h"
 #include "esp_websocket_client.h"
 #include "my_client.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -37,6 +38,13 @@ static TickType_t s_open_tick;        /* open 时刻：首帧超时的计时起�
 static esp_websocket_client_handle_t s_ws;
 static StreamBufferHandle_t s_ws_sb;  /* 下行字节管道：WS 事件任务 → 本任务（chat） */
 static EventGroupHandle_t   s_ws_ev;
+
+/* 下行管道的**存储放 PSRAM**：32KB 要求一块连续内部 RAM，而内部堆被
+ * WiFi/lwIP/esp-sr 切碎后最大连续块不够（HANDOFF 坑 31）。管道只被 WS 任务
+ * （写）和 chat 任务（读）访问，**从不在 ISR 里碰**，所以 static 版放 PSRAM 安全；
+ * PSRAM 拿不到时退回普通内部 RAM 版，保证功能不丢。 */
+static StaticStreamBuffer_t s_ws_sb_struct;
+static uint8_t             *s_ws_sb_storage;
 static volatile bool s_ws_helloed;    /* 本条连接已发过 hello（断线重连后须重发） */
 static volatile bool s_ws_poison;     /* 下行管道写不进（播放端卡死）→ 连接作废重建 */
 static volatile bool s_ws_turn_done;  /* tx_turn_finished() 置位：读到 done/err，本轮终结 */
@@ -115,10 +123,28 @@ static esp_err_t ws_ensure(void)
         s_ws = NULL;
         s_ws_helloed = false;
     }
-    if (s_ws_sb == NULL) s_ws_sb = xStreamBufferCreate(AI_WS_DOWN_BUF_BYTES, 1);
+    if (s_ws_sb == NULL) {
+        if (s_ws_sb_storage == NULL) {
+            s_ws_sb_storage = heap_caps_malloc(AI_WS_DOWN_BUF_BYTES,
+                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        }
+        if (s_ws_sb_storage != NULL) {
+            s_ws_sb = xStreamBufferCreateStatic(AI_WS_DOWN_BUF_BYTES, 1,
+                                                s_ws_sb_storage, &s_ws_sb_struct);
+        }
+        if (s_ws_sb == NULL) {
+            /* PSRAM 不可用：退回内部 RAM（32KB 连续块，可能失败）*/
+            ESP_LOGW(TAG, "ws 下行管道 PSRAM 失败 -> 退回内部 RAM");
+            s_ws_sb = xStreamBufferCreate(AI_WS_DOWN_BUF_BYTES, 1);
+        }
+    }
     if (s_ws_ev == NULL) s_ws_ev = xEventGroupCreate();
     if (s_ws_sb == NULL || s_ws_ev == NULL) {
-        ESP_LOGE(TAG, "ws os resource alloc failed");
+        /* 带上数字，否则下次又只能猜：内部 RAM 没连续 32KB 是常见死法 */
+        ESP_LOGE(TAG, "ws os resource alloc failed (sb=%p ev=%p, internal free=%u largest=%u)",
+                 s_ws_sb, s_ws_ev,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         return ESP_FAIL;
     }
     xStreamBufferReset(s_ws_sb);

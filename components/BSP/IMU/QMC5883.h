@@ -5,8 +5,7 @@
 #ifndef HELLO_WORLD_QMC5883_H
 #define HELLO_WORLD_QMC5883_H
 
-/* 原来这里是 <cstdint> —— 那是 C++ 标准库头，C 文件 include 会直接
- * "fatal error: cstdint: No such file or directory"。C/C++ 通用头必须是 <stdint.h> */
+/* C/C++ 通用头只能用 <stdint.h>，<cstdint> 在 C 文件里会 fatal error */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -16,7 +15,7 @@
 extern "C" {
 #endif
 
-/* 写寄存器，返回错误码（原来是 void，配置写失败完全不可见） */
+/* 写寄存器，返回错误码（写失败必须让上层看得见） */
 esp_err_t QMC5883_Write(uint8_t reg_addr, uint8_t data);
 
 esp_err_t QMC5883_Read(uint8_t reg_addr, uint8_t *data, size_t len);

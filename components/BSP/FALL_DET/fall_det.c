@@ -684,8 +684,8 @@ static void fall_det_task(void *pv)
 				missed = 1;
 			}
 			s_stats.drops += missed;
-			ESP_LOGW(TAG, "丢拍 %u 帧（间隔 %.1f ms），累计 %u",
-				 (unsigned)missed, s_stats.last_dt_ms, (unsigned)s_stats.drops);
+			/*先注释，日志刷的太快了ESP_LOGW(TAG, "丢拍 %u 帧（间隔 %.1f ms），累计 %u",
+				 (unsigned)missed, s_stats.last_dt_ms, (unsigned)s_stats.drops);*/
 		}
 
 		s_stats.frames++;

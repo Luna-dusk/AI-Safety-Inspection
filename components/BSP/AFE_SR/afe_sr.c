@@ -45,9 +45,8 @@ static SemaphoreHandle_t fetch_sem = NULL;
  * 本机没有播放参考通道（喇叭走 I2S0 TX，不回灌到 I2S1 RX），所以是 "MM" 而不是
  * 官方示例的 "MMNR"。feed 数据必须是**通道交错**格式。
  *
- * 回退：改回 "M" 即恢复 2026-11 之前的单麦行为（afe_feed_task 会自动切回单声道
- * 读取路径），不需要动别的代码。若上板出现 VAD 不结束 / 识别变差 / 内存不足，
- * 先回退再排查。 */
+ * 回退：改回 "M" 即恢复单麦行为（afe_feed_task 会自动切回单声道读取路径），
+ * 不需要动别的代码。若上板出现 VAD 不结束 / 识别变差 / 内存不足，先回退再排查。 */
 #define AFE_INPUT_FORMAT  "MM"
 
 #define AFE_LOCK()   do { if (afe_lock) xSemaphoreTake(afe_lock, portMAX_DELAY); } while (0)
@@ -562,8 +561,8 @@ static void afe_fetch_task(void *arg)
  *   - aec_init = false（不启用回声消除，仍靠 capture_enabled 软静音隔离播放）；
  *   - wakenet_init = true，优先选 nihaoxiaoxin 唤醒词，找不到就取任意一个；
  *   - memory_alloc_mode 保持默认（BALANCE）：官方 GSC 文档实测"数据放 PSRAM 比放
- *     内部 RAM 多约 25% CPU"，而双麦 feed 已经要 46%，不值得再为省内部 RAM 加
- *     CPU。内部 RAM 真不够时再改 MORE_PSRAM，别一上来就换。
+ *     内部 RAM 多约 25% CPU"，而双麦 feed 已经 46%，不值得再为省内部 RAM 加
+ *     CPU。内部 RAM 真不够时再改 MORE_PSRAM。
  *
  * @note 双麦/单麦切换只改 AFE_INPUT_FORMAT 一个宏（详见文件顶部说明），
  *       afe_feed_task 会自动跟着 get_feed_channel_num() 切读取路径。
@@ -592,10 +591,8 @@ esp_err_t afe_init(void)
 
     afe_config->aec_init = false;
     afe_config->wakenet_init = true;
-    /* memory_alloc_mode 故意不动：官方基准数据就是默认配置下测的
-     * （S3 / MMNR / SR / HIGH_PERF = internal 82.2 KB + PSRAM 1198.2 KB）。
-     * 把它改成 MORE_PSRAM 会把更多热数据推到 PSRAM，官方 GSC 文档实测这种
-     * 迁移要多花约 25% CPU，而 feed 已经 46% 了。 */
+    /* memory_alloc_mode 故意不动：官方基准就是默认配置下测的，改成 MORE_PSRAM
+     * 要把热数据推到 PSRAM，官方 GSC 文档实测多花约 25% CPU，而 feed 已经 46%。 */
     ESP_LOGI(TAG, "AFE mem before create: internal %u free, psram %u free",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));

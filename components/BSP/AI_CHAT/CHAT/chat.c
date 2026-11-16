@@ -322,7 +322,7 @@ static void do_turn(QueueHandle_t q, audio_frame_t *first, bool greeting)
     /* 问候轮在此关采集防自播回灌；正常轮【绝不能】在这里关——
      * 正常轮 do_turn 从首帧就开始（流式上传），说话还在继续，
      * 此时关采集会让 fetch 丢弃后续语音、永远等不到 END 帧，
-     * upload_loop 死等 → 无回复且设备失聪（2026-11-08 真机踩坑）。
+     * upload_loop 死等 → 无回复且设备失聪（HANDOFF 坑 22）。
      * 正常轮的采集关闭由 fetch 任务在 utterance end 时完成，
      * 播放期间的防回灌由 prompt/TTS 播放路径各自幂等关闭。 */
     if (greeting) {
@@ -366,6 +366,15 @@ static void do_turn(QueueHandle_t q, audio_frame_t *first, bool greeting)
 void ai_chat_task(void *arg)
 {
     QueueHandle_t q = (QueueHandle_t)arg;
+    /* 防御：arg 为空说明 main 里 xQueueCreate 失败。以前这里会一直跑到
+     * xQueueReceive 里 configASSERT(pxQueue) 断言（queue.c:1531），
+     * 表现成“看门狗复位循环”、根因被埋掉。宁可任务自己退场 + 留一行日志。*/
+    if (q == NULL) {
+        ESP_LOGE(TAG, "pcm_queue is NULL (xQueueCreate failed?) - ai_chat task exit");
+        vTaskDelete(NULL);
+        return;
+    }
+
     s_chat_handle = xTaskGetCurrentTaskHandle();
     ai_frames_init(&s_frames, on_frame, &s_ctx);
 

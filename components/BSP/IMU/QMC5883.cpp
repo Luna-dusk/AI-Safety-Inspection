@@ -16,8 +16,7 @@
 #include "freertos/task.h"
 #include "QMC5883_reg.h"
 
-/* 注意原版写的是 "qmc5883_reg.h"（小写）。Windows 文件系统不区分大小写所以能编过，
- * 一上 Linux CI 就找不到文件。文件名大小写必须和磁盘一致。 */
+/* 文件名大小写必须与磁盘一致：Windows 不区分大小写能编过，Linux CI 就找不到 */
 
 #define QMC5883_ADDRESS         0x0D
 
@@ -94,9 +93,8 @@ esp_err_t QMC5883_Init(void)
         if (err != ESP_OK) {
                 return err;
         }
-        /* 原版是 vTaskDelay(100)：那是 100 个 **tick**，不是 100ms。
-         * 100Hz tick 下等于 1 秒，1000Hz 下才是 100ms —— 这种单位错不会报错，只会让人以为"卡住了"。
-         * 软复位只需几 ms，这里给 20ms 足够。 */
+        /* 软复位后等 20ms 再配置；注意 vTaskDelay 一律包 pdMS_TO_TICKS ——
+         * 直接写数字是 **tick** 不是 ms，100Hz tick 下会变成 1 秒。 */
         vTaskDelay(pdMS_TO_TICKS(20));
 
         /* 2. SET/RESET 周期。datasheet 明确推荐 0x01；
