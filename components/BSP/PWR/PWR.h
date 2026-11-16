@@ -1,9 +1,3 @@
-//
-// Created by l on 2026/11/12.
-//
-// 移植自 mzx 分支 main/PWR.{h,cpp}（电源自锁），已改为 BSP 组件目录布局。
-//
-
 #ifndef BSP_PWR_H
 #define BSP_PWR_H
 
